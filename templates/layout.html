@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TheTaskManager</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>TheTaskManager</h1>
+      <p>Local kanban for humans, API-first task flow for agents.</p>
+    </div>
+    <nav>
+      <a href="/api" target="_blank">API</a>
+      <a href="/api/docs" target="_blank">Bot Docs</a>
+      <a href="/api/openapi.yaml" target="_blank">OpenAPI</a>
+    </nav>
+  </header>
+
+  {{template "board.html" .}}
+</body>
+</html>

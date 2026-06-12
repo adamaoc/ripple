@@ -1,0 +1,78 @@
+{{define "board.html"}}
+<main id="board-shell" class="shell">
+  <section class="filters">
+    <form hx-get="/" hx-target="#board-shell" hx-swap="outerHTML">
+      <label>
+        Project
+        <select name="projectId">
+          <option value="">All projects</option>
+          {{range .Projects}}
+          <option value="{{.ID}}" {{if eq $.SelectedProject .ID}}selected{{end}}>{{.Name}} ({{.Prefix}})</option>
+          {{end}}
+        </select>
+      </label>
+      <label>
+        Epic
+        <select name="epicId">
+          <option value="">All epics</option>
+          {{range .Epics}}
+          <option value="{{.ID}}" {{if eq $.SelectedEpic .ID}}selected{{end}}>{{.Name}}</option>
+          {{end}}
+        </select>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" name="showClosed" value="1" {{if .ShowClosed}}checked{{end}}>
+        Show closed
+      </label>
+      <button type="submit">Apply</button>
+    </form>
+    <form hx-post="/stories/close-done" hx-target="#board-shell" hx-swap="outerHTML" class="close-done">
+      <input type="hidden" name="projectId" value="{{.SelectedProject}}">
+      <input type="hidden" name="epicId" value="{{.SelectedEpic}}">
+      {{if .ShowClosed}}<input type="hidden" name="showClosed" value="1">{{end}}
+      <input name="closeComment" placeholder="Optional close comment">
+      <button type="submit">Close all done</button>
+    </form>
+  </section>
+
+  <section class="board">
+    {{range .StatusColumns}}
+    {{$status := .}}
+    <div class="column">
+      <div class="column-header">
+        <h2>{{statusTitle $status}}</h2>
+        <span>{{len (index $.StoriesByCol $status)}}</span>
+      </div>
+      <div class="cards">
+        {{range index $.StoriesByCol $status}}
+        <article class="card" hx-get="/stories/{{.ID}}/panel" hx-target="#detail-panel" hx-swap="innerHTML">
+          <div class="card-id">{{.ID}}</div>
+          <h3>{{.Title}}</h3>
+          <p>{{.ProjectName}}{{with .EpicName}} / {{.}}{{end}}</p>
+          <form hx-post="/stories/{{.ID}}/status" hx-target="#board-shell" hx-swap="outerHTML" onclick="event.stopPropagation()">
+            <input type="hidden" name="projectId" value="{{$.SelectedProject}}">
+            <input type="hidden" name="epicId" value="{{$.SelectedEpic}}">
+            {{if $.ShowClosed}}<input type="hidden" name="showClosed" value="1">{{end}}
+            <select name="status" onchange="this.form.requestSubmit()">
+              <option value="backlog" {{if eq .Status "backlog"}}selected{{end}}>Backlog</option>
+              <option value="in_progress" {{if eq .Status "in_progress"}}selected{{end}}>In Progress</option>
+              <option value="done" {{if eq .Status "done"}}selected{{end}}>Done</option>
+            </select>
+          </form>
+        </article>
+        {{else}}
+        <div class="empty">No stories</div>
+        {{end}}
+      </div>
+    </div>
+    {{end}}
+  </section>
+
+  <aside id="detail-panel" class="detail-panel">
+    <div class="placeholder">
+      <h2>Select a story</h2>
+      <p>Open a card to edit its markdown description, review history, or close it manually.</p>
+    </div>
+  </aside>
+</main>
+{{end}}

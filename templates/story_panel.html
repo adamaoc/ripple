@@ -1,0 +1,35 @@
+{{define "story_panel.html"}}
+<div class="detail-header">
+  <div>
+    <span class="card-id">{{.Story.ID}}</span>
+    <h2>{{.Story.Title}}</h2>
+    <p>{{.Story.ProjectName}}{{with .Story.EpicName}} / {{.}}{{end}}</p>
+  </div>
+  <form hx-post="/stories/{{.Story.ID}}/close" hx-target="#board-shell" hx-swap="outerHTML">
+    <input name="closeComment" placeholder="Close comment">
+    <button type="submit">Close</button>
+  </form>
+</div>
+
+<section class="description">
+  <h3>Description</h3>
+  <div class="markdown">{{markdown .Story.Description}}</div>
+  <form hx-post="/stories/{{.Story.ID}}/description" hx-target="#detail-panel" hx-swap="innerHTML">
+    <textarea name="description" rows="10">{{.Story.Description}}</textarea>
+    <button type="submit">Save description</button>
+  </form>
+</section>
+
+<section class="events">
+  <h3>History</h3>
+  {{range .Events}}
+  <div class="event">
+    <strong>{{.Type}}</strong>
+    <span>{{.CreatedAt.Format "2006-01-02 15:04"}}</span>
+    <p>{{.Message}}</p>
+  </div>
+  {{else}}
+  <p>No events yet.</p>
+  {{end}}
+</section>
+{{end}}

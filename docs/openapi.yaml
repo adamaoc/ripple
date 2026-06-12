@@ -1,0 +1,213 @@
+openapi: 3.1.0
+info:
+  title: TheTaskManager API
+  version: 0.1.0
+  description: Local JSON API for bot-driven task management.
+servers:
+  - url: http://localhost:8080
+paths:
+  /api:
+    get:
+      summary: Discover API capabilities and bot rules
+      responses:
+        "200":
+          description: API discovery document
+  /api/docs:
+    get:
+      summary: Bot-facing Markdown usage guide
+      responses:
+        "200":
+          description: Markdown documentation
+  /api/openapi.yaml:
+    get:
+      summary: OpenAPI schema
+      responses:
+        "200":
+          description: OpenAPI YAML
+  /api/projects:
+    get:
+      summary: List projects
+      responses:
+        "200":
+          description: Projects
+    post:
+      summary: Create a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                id:
+                  type: string
+                name:
+                  type: string
+                prefix:
+                  type: string
+      responses:
+        "201":
+          description: Created project
+  /api/epics:
+    get:
+      summary: List epics
+      parameters:
+        - name: projectId
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Epics
+    post:
+      summary: Create an epic
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [projectId, name]
+              properties:
+                id:
+                  type: string
+                projectId:
+                  type: string
+                name:
+                  type: string
+                description:
+                  type: string
+      responses:
+        "201":
+          description: Created epic
+  /api/stories:
+    get:
+      summary: List stories
+      description: Closed stories are excluded unless showClosed=1 or status=closed.
+      parameters:
+        - name: projectId
+          in: query
+          schema:
+            type: string
+        - name: epicId
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/StoryStatus"
+        - name: showClosed
+          in: query
+          schema:
+            type: string
+            enum: ["1"]
+      responses:
+        "200":
+          description: Stories
+    post:
+      summary: Create a story
+      description: Creates or reuses a project/epic when projectName or epicName are supplied.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, description]
+              properties:
+                title:
+                  type: string
+                description:
+                  type: string
+                  description: Markdown description.
+                status:
+                  $ref: "#/components/schemas/BotWritableStatus"
+                projectId:
+                  type: string
+                projectName:
+                  type: string
+                projectPrefix:
+                  type: string
+                epicId:
+                  type: string
+                epicName:
+                  type: string
+      responses:
+        "201":
+          description: Created story
+  /api/stories/{id}:
+    get:
+      summary: Get a story
+      parameters:
+        - $ref: "#/components/parameters/StoryID"
+      responses:
+        "200":
+          description: Story
+    patch:
+      summary: Update story details
+      parameters:
+        - $ref: "#/components/parameters/StoryID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                description:
+                  type: string
+                epicId:
+                  type: string
+                  description: Empty string removes the epic.
+      responses:
+        "200":
+          description: Updated story
+  /api/stories/{id}/status:
+    patch:
+      summary: Move a story through the bot-writable workflow
+      description: Bots may set backlog, in_progress, or done. Closed is manual-only and rejected here.
+      parameters:
+        - $ref: "#/components/parameters/StoryID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  $ref: "#/components/schemas/BotWritableStatus"
+      responses:
+        "200":
+          description: Updated story
+        "400":
+          description: Invalid status
+  /api/stories/{id}/events:
+    get:
+      summary: Get story event history
+      parameters:
+        - $ref: "#/components/parameters/StoryID"
+      responses:
+        "200":
+          description: Story events
+components:
+  parameters:
+    StoryID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      example: TXG-001
+  schemas:
+    StoryStatus:
+      type: string
+      enum: [backlog, in_progress, done, closed]
+    BotWritableStatus:
+      type: string
+      enum: [backlog, in_progress, done]
