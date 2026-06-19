@@ -22,8 +22,9 @@ GET /api/openapi.yaml
 - Every story belongs to a project.
 - An epic is optional.
 - Story descriptions are Markdown.
-- Intended flow is `backlog -> in_progress -> done`.
+- Intended flow is `backlog -> queued -> in_progress -> done`.
 - Bots may only set story status to `backlog`, `in_progress`, or `done`.
+- `queued` is currently human-facing and reserved for future agent-pickup work.
 - Bots must not close stories. Closing is a manual human review action in the UI.
 - If a user says work is complete, move the story to `done`, not `closed`.
 - Closed stories are hidden from the default board and default story list.
@@ -33,6 +34,8 @@ GET /api/openapi.yaml
 Stories use project-prefixed IDs such as `TXG-001` or `RV-001`.
 
 Projects have a required prefix. When creating a project through a story request, provide `projectPrefix` if the user has a clear preference. If no prefix is known, choose a short uppercase prefix from the project name.
+
+Projects may also have a `workingDirectory`. Use the Git repository root, or the folder where Codex should start work for that project. If a project already exists without a working directory, providing one in a later project or story request fills it in. Existing working directories are not overwritten silently.
 
 ## Create a Project
 
@@ -45,7 +48,8 @@ Content-Type: application/json
 {
   "id": "txgarage",
   "name": "TXGarage",
-  "prefix": "TXG"
+  "prefix": "TXG",
+  "workingDirectory": "/Users/adamm/Documents/WEBPROJECTS/Sites and Apps/TXGarage"
 }
 ```
 
@@ -91,6 +95,7 @@ Content-Type: application/json
 {
   "projectName": "Real View",
   "projectPrefix": "RV",
+  "workingDirectory": "/Users/adamm/Documents/WEBPROJECTS/Sites and Apps/RealView",
   "epicName": "Listing workflow",
   "title": "Show listing preview before publish",
   "description": "Render a Markdown-friendly preview of the listing before it goes live."

@@ -59,10 +59,11 @@ Epics are created through the API, not through the UI. The UI only filters by ep
 
 ### Statuses
 
-Stories support four statuses:
+Stories support five statuses:
 
 ```txt
 backlog
+queued
 in_progress
 done
 closed
@@ -71,12 +72,12 @@ closed
 The intended flow is:
 
 ```txt
-backlog -> in_progress -> done -> closed
+backlog -> queued -> in_progress -> done -> closed
 ```
 
 This flow is documented, but not rigidly locked between the bot-writable states. Bots can move a story directly between `backlog`, `in_progress`, and `done` when needed.
 
-Bots cannot move stories to `closed`. Closing is a manual human review action.
+Bots cannot move stories to `queued` or `closed`. Queued is currently a human-facing planning status, and closing is a manual human review action.
 
 In practice:
 

@@ -9,9 +9,12 @@
 </head>
 <body>
   <header class="topbar">
-    <div>
-      <h1>TheTaskManager</h1>
-      <p>Local kanban for humans, API-first task flow for agents.</p>
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">TT</div>
+      <div>
+        <h1>TheTaskManager</h1>
+        <p>Local kanban for humans, API-first task flow for agents.</p>
+      </div>
     </div>
     <nav>
       <a href="/api" target="_blank">API</a>
@@ -21,5 +24,373 @@
   </header>
 
   {{template "board.html" .}}
+  <script>
+    (() => {
+      let boardURLNeedsRefresh = false;
+      let agentEvents = null;
+      let agentEventsKey = "";
+      let activityRefreshPending = false;
+      let boardRefreshPending = false;
+      let deferredBoardRefresh = false;
+
+      function currentFilterParams() {
+        const params = new URLSearchParams();
+        const form = document.querySelector("[data-board-filter-form]");
+        if (!form) {
+          return params;
+        }
+        const data = new FormData(form);
+        const projectId = data.get("projectId");
+        const epicId = data.get("epicId");
+        if (projectId) {
+          params.set("projectId", projectId);
+        }
+        if (epicId) {
+          params.set("epicId", epicId);
+        }
+        if (data.get("showClosed") === "1") {
+          params.set("showClosed", "1");
+        }
+        return params;
+      }
+
+      function boardURL(params) {
+        const next = new URL(window.location.href);
+        next.pathname = "/";
+        next.search = params.toString();
+        next.hash = "";
+        return next;
+      }
+
+      function replaceBoardURL() {
+        history.replaceState(null, "", boardURL(currentFilterParams()));
+      }
+
+      function pushStoryURL(storyId) {
+        const params = currentFilterParams();
+        params.set("storyId", storyId);
+        const next = boardURL(params);
+        if (next.href !== window.location.href) {
+          history.pushState(null, "", next);
+        }
+      }
+
+      function storyModal() {
+        return document.getElementById("story-modal");
+      }
+
+      function folderPickerModal() {
+        return document.getElementById("folder-picker");
+      }
+
+      function openStoryModal() {
+        const modal = storyModal();
+        if (modal && !modal.open) {
+          modal.showModal();
+        }
+      }
+
+      function openFolderPickerModal() {
+        const modal = folderPickerModal();
+        if (modal && !modal.open) {
+          modal.showModal();
+        }
+      }
+
+      function closeStoryModal() {
+        const modal = storyModal();
+        if (modal && modal.open) {
+          modal.close();
+        }
+      }
+
+      function closeFolderPickerModal() {
+        const modal = folderPickerModal();
+        if (modal && modal.open) {
+          modal.close();
+        }
+      }
+
+      function clearStoryURL() {
+        const params = currentFilterParams();
+        const next = boardURL(params);
+        if (next.href !== window.location.href) {
+          history.pushState(null, "", next);
+        }
+      }
+
+      function openRestoredStoryModal() {
+        const modal = storyModal();
+        if (modal && modal.dataset.hasStory === "true") {
+          openStoryModal();
+        }
+      }
+
+      function fragmentURL(path) {
+        const params = currentFilterParams();
+        const query = params.toString();
+        return query ? `${path}?${query}` : path;
+      }
+
+      function detailsState(root) {
+        const state = new Map();
+        if (!root) {
+          return state;
+        }
+        root.querySelectorAll("details[data-preserve-details]").forEach((details) => {
+          state.set(details.dataset.preserveDetails, details.open);
+        });
+        if (root.matches && root.matches("details[data-preserve-details]")) {
+          state.set(root.dataset.preserveDetails, root.open);
+        }
+        return state;
+      }
+
+      function restoreDetailsState(root, state) {
+        if (!root || !state.size) {
+          return;
+        }
+        root.querySelectorAll("details[data-preserve-details]").forEach((details) => {
+          if (state.has(details.dataset.preserveDetails)) {
+            details.open = state.get(details.dataset.preserveDetails);
+          }
+        });
+        if (root.matches && root.matches("details[data-preserve-details]") && state.has(root.dataset.preserveDetails)) {
+          root.open = state.get(root.dataset.preserveDetails);
+        }
+      }
+
+      function viewportBottom() {
+        return window.scrollY + window.innerHeight;
+      }
+
+      function isNearDocumentBottom() {
+        return document.documentElement.scrollHeight - viewportBottom() < 180;
+      }
+
+      function shouldFollowActivity(current) {
+        if (!current || !current.open) {
+          return false;
+        }
+        const body = current.querySelector(".agent-activity-body");
+        if (body) {
+          return body.scrollHeight - body.scrollTop - body.clientHeight < 120;
+        }
+        const rect = current.getBoundingClientRect();
+        const activityBottom = window.scrollY + rect.bottom;
+        return activityBottom - viewportBottom() < 220 || isNearDocumentBottom();
+      }
+
+      async function replaceFragment(path, selector, options = {}) {
+        const existing = document.querySelector(selector);
+        const oldScrollY = window.scrollY;
+        const oldDetails = options.preserveDetails ? detailsState(existing) : new Map();
+        const followActivity = options.followActivity ? shouldFollowActivity(existing) : false;
+        const scrollBox = options.scrollBoxSelector && existing ? existing.querySelector(options.scrollBoxSelector) : null;
+        const oldScrollTop = scrollBox ? scrollBox.scrollTop : 0;
+        const response = await fetch(fragmentURL(path), {
+          headers: { "HX-Request": "true" }
+        });
+        if (!response.ok) {
+          return;
+        }
+        const html = await response.text();
+        const template = document.createElement("template");
+        template.innerHTML = html.trim();
+        const next = template.content.firstElementChild;
+        const current = document.querySelector(selector);
+        if (!current || !next) {
+          return;
+        }
+        current.replaceWith(next);
+        restoreDetailsState(next, oldDetails);
+        if (window.htmx) {
+          window.htmx.process(next);
+        }
+        if (followActivity) {
+          requestAnimationFrame(() => {
+            const nextScrollBox = options.scrollBoxSelector ? next.querySelector(options.scrollBoxSelector) : null;
+            if (nextScrollBox) {
+              nextScrollBox.scrollTop = nextScrollBox.scrollHeight;
+            } else {
+              next.scrollIntoView({ block: "end" });
+            }
+          });
+        } else if (scrollBox && options.scrollBoxSelector) {
+          requestAnimationFrame(() => {
+            const nextScrollBox = next.querySelector(options.scrollBoxSelector);
+            if (nextScrollBox) {
+              nextScrollBox.scrollTop = oldScrollTop;
+            }
+          });
+        } else if (options.preserveScroll) {
+          window.scrollTo({ top: oldScrollY, left: window.scrollX });
+        }
+      }
+
+      function boardSwapIsBlocked() {
+        return Boolean(document.querySelector("#story-modal[open], #folder-picker[open], .path-needed[open], .agent-error-details[open]"));
+      }
+
+      async function refreshAgentChrome() {
+        if (activityRefreshPending) {
+          return;
+        }
+        activityRefreshPending = true;
+        try {
+          await replaceFragment("/agent/status", "#agent-run-controls", { preserveDetails: true });
+          await replaceFragment("/agent/activity", "#agent-activity", {
+            preserveDetails: true,
+            preserveScroll: true,
+            followActivity: true,
+            scrollBoxSelector: ".agent-activity-body"
+          });
+        } finally {
+          activityRefreshPending = false;
+        }
+      }
+
+      async function refreshBoardFromStream() {
+        if (boardSwapIsBlocked()) {
+          deferredBoardRefresh = true;
+          await refreshAgentChrome();
+          return;
+        }
+        if (boardRefreshPending) {
+          return;
+        }
+        boardRefreshPending = true;
+        try {
+          await replaceFragment("/board", "#board-shell", {
+            preserveDetails: true,
+            preserveScroll: true
+          });
+          deferredBoardRefresh = false;
+          connectAgentEvents();
+        } finally {
+          boardRefreshPending = false;
+        }
+      }
+
+      function flushDeferredBoardRefresh() {
+        if (deferredBoardRefresh && !boardSwapIsBlocked()) {
+          refreshBoardFromStream();
+        }
+      }
+
+      function connectAgentEvents() {
+        if (!window.EventSource) {
+          return;
+        }
+        const key = currentFilterParams().toString();
+        if (agentEvents && agentEventsKey === key) {
+          return;
+        }
+        if (agentEvents) {
+          agentEvents.close();
+        }
+        agentEventsKey = key;
+        agentEvents = new EventSource(fragmentURL("/agent/events"));
+        agentEvents.addEventListener("activity", () => {
+          refreshAgentChrome();
+        });
+        agentEvents.addEventListener("board", () => {
+          refreshBoardFromStream();
+        });
+      }
+
+      function updateBulkSelection(section) {
+        if (!section) {
+          return;
+        }
+        const selected = section.querySelectorAll(".backlog-select-checkbox:checked").length;
+        const count = section.querySelector("[data-selected-count]");
+        const submit = section.querySelector("[data-bulk-selected-submit]");
+        if (count) {
+          count.textContent = selected;
+        }
+        if (submit) {
+          submit.disabled = selected === 0;
+        }
+      }
+
+      document.body.addEventListener("submit", (event) => {
+        if (event.target.matches("[data-board-filter-form], [data-board-refresh-form]")) {
+          boardURLNeedsRefresh = true;
+        }
+      });
+
+      document.body.addEventListener("click", (event) => {
+        const selectToggle = event.target.closest("[data-select-mode-toggle]");
+        if (selectToggle) {
+          const section = selectToggle.closest(".status-section");
+          section.classList.toggle("select-mode");
+          const selecting = section.classList.contains("select-mode");
+          selectToggle.textContent = selecting ? "Cancel selection" : "Select stories";
+          if (!selecting) {
+            section.querySelectorAll(".backlog-select-checkbox").forEach((checkbox) => {
+              checkbox.checked = false;
+            });
+          }
+          updateBulkSelection(section);
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        if (event.target.closest("[data-modal-close]")) {
+          closeStoryModal();
+          clearStoryURL();
+        }
+        if (event.target.closest("[data-folder-picker-close]")) {
+          closeFolderPickerModal();
+        }
+      });
+
+      document.body.addEventListener("click", (event) => {
+        const card = event.target.closest("[data-story-id]");
+        if (!card || event.target.closest("form")) {
+          return;
+        }
+        pushStoryURL(card.dataset.storyId);
+      });
+
+      document.body.addEventListener("change", (event) => {
+        if (event.target.matches(".backlog-select-checkbox")) {
+          updateBulkSelection(event.target.closest(".status-section"));
+        }
+      });
+
+      document.body.addEventListener("htmx:afterSwap", (event) => {
+        if (event.detail.target && event.detail.target.id === "board-shell" && boardURLNeedsRefresh) {
+          replaceBoardURL();
+          boardURLNeedsRefresh = false;
+          connectAgentEvents();
+        }
+        if (event.detail.target && event.detail.target.id === "story-modal-content") {
+          openStoryModal();
+        }
+        if (event.detail.target && event.detail.target.id === "folder-picker-content") {
+          openFolderPickerModal();
+        }
+      });
+
+      document.body.addEventListener("close", (event) => {
+        if (event.target && event.target.id === "story-modal") {
+          clearStoryURL();
+          flushDeferredBoardRefresh();
+        }
+        if (event.target && event.target.id === "folder-picker") {
+          flushDeferredBoardRefresh();
+        }
+      }, true);
+
+      window.addEventListener("popstate", () => {
+        window.location.reload();
+      });
+
+      openRestoredStoryModal();
+      connectAgentEvents();
+    })();
+  </script>
 </body>
 </html>

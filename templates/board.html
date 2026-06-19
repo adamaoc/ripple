@@ -1,7 +1,7 @@
 {{define "board.html"}}
 <main id="board-shell" class="shell">
   <section class="filters">
-    <form hx-get="/" hx-target="#board-shell" hx-swap="outerHTML">
+    <form id="filter-form" data-board-filter-form hx-get="/board" hx-target="#board-shell" hx-swap="outerHTML">
       <label>
         Project
         <select name="projectId">
@@ -26,53 +26,452 @@
       </label>
       <button type="submit">Apply</button>
     </form>
-    <form hx-post="/stories/close-done" hx-target="#board-shell" hx-swap="outerHTML" class="close-done">
-      <input type="hidden" name="projectId" value="{{.SelectedProject}}">
-      <input type="hidden" name="epicId" value="{{.SelectedEpic}}">
-      {{if .ShowClosed}}<input type="hidden" name="showClosed" value="1">{{end}}
-      <input name="closeComment" placeholder="Optional close comment">
-      <button type="submit">Close all done</button>
-    </form>
   </section>
 
-  <section class="board">
-    {{range .StatusColumns}}
-    {{$status := .}}
-    <div class="column">
-      <div class="column-header">
-        <h2>{{statusTitle $status}}</h2>
-        <span>{{len (index $.StoriesByCol $status)}}</span>
+  <section class="focus-row">
+    <section class="queued-panel status-panel column-queued">
+      <div class="section-header">
+        <h2><span class="status-dot"></span>Queued</h2>
+        <div class="section-actions">
+          <span class="column-count">{{len (index .StoriesByCol "queued")}}</span>
+          {{template "agent_run_controls.html" .Agent}}
+        </div>
       </div>
+      {{template "agent_activity.html" .Agent}}
       <div class="cards">
-        {{range index $.StoriesByCol $status}}
-        <article class="card" hx-get="/stories/{{.ID}}/panel" hx-target="#detail-panel" hx-swap="innerHTML">
-          <div class="card-id">{{.ID}}</div>
-          <h3>{{.Title}}</h3>
-          <p>{{.ProjectName}}{{with .EpicName}} / {{.}}{{end}}</p>
-          <form hx-post="/stories/{{.ID}}/status" hx-target="#board-shell" hx-swap="outerHTML" onclick="event.stopPropagation()">
-            <input type="hidden" name="projectId" value="{{$.SelectedProject}}">
-            <input type="hidden" name="epicId" value="{{$.SelectedEpic}}">
-            {{if $.ShowClosed}}<input type="hidden" name="showClosed" value="1">{{end}}
-            <select name="status" onchange="this.form.requestSubmit()">
-              <option value="backlog" {{if eq .Status "backlog"}}selected{{end}}>Backlog</option>
-              <option value="in_progress" {{if eq .Status "in_progress"}}selected{{end}}>In Progress</option>
-              <option value="done" {{if eq .Status "done"}}selected{{end}}>Done</option>
-            </select>
-          </form>
-        </article>
+        {{range index .StoriesByCol "queued"}}
+        {{template "story_card.html" .}}
         {{else}}
-        <div class="empty">No stories</div>
+        <div class="empty">No queued stories</div>
         {{end}}
       </div>
-    </div>
+    </section>
+
+    <aside id="detail-panel" class="detail-panel dashboard-card">
+      {{template "dashboard_panel.html" .Dashboard}}
+    </aside>
+  </section>
+
+  <section class="workflow-sections">
+    <details class="status-section column-backlog" open>
+      <summary>
+        <span><span class="status-dot"></span>Backlog</span>
+        <span class="column-count">{{len (index .StoriesByCol "backlog")}}</span>
+      </summary>
+      <div class="bulk-toolbar">
+        <button type="button" class="secondary-button" data-select-mode-toggle>Select stories</button>
+        <form id="bulk-queue-form" data-board-refresh-form hx-post="/stories/queue-backlog" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form, .backlog-select-checkbox:checked">
+          <button type="submit" data-bulk-selected-submit disabled>Queue selected <span data-selected-count>0</span></button>
+        </form>
+        {{if .SelectedEpic}}
+        <form data-board-refresh-form hx-post="/stories/queue-backlog" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
+          <input type="hidden" name="scope" value="epic">
+          <button type="submit">Queue all backlog in epic</button>
+        </form>
+        {{end}}
+      </div>
+      <div class="cards card-grid">
+        {{range index .StoriesByCol "backlog"}}
+        {{template "selectable_story_card.html" .}}
+        {{else}}
+        <div class="empty">No backlog stories</div>
+        {{end}}
+      </div>
+    </details>
+
+    <details class="status-section column-in_progress" open>
+      <summary>
+        <span><span class="status-dot"></span>In Progress</span>
+        <span class="column-count">{{len (index .StoriesByCol "in_progress")}}</span>
+      </summary>
+      <div class="cards card-grid">
+        {{range index .StoriesByCol "in_progress"}}
+        {{template "story_card.html" .}}
+        {{else}}
+        <div class="empty">No in-progress stories</div>
+        {{end}}
+      </div>
+    </details>
+
+    <details class="status-section column-done" open>
+      <summary>
+        <span><span class="status-dot"></span>Done</span>
+        <span class="column-count">{{len (index .StoriesByCol "done")}}</span>
+      </summary>
+      <form data-board-refresh-form hx-post="/stories/close-done" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form" class="close-done">
+        <input name="closeComment" placeholder="Optional close comment">
+        <button type="submit">Close all done</button>
+      </form>
+      <div class="cards card-grid">
+        {{range index .StoriesByCol "done"}}
+        {{template "story_card.html" .}}
+        {{else}}
+        <div class="empty">No done stories</div>
+        {{end}}
+      </div>
+    </details>
+
+    {{if .ShowClosed}}
+    <details class="status-section column-closed" open>
+      <summary>
+        <span><span class="status-dot"></span>Closed</span>
+        <span class="column-count">{{len (index .StoriesByCol "closed")}}</span>
+      </summary>
+      <div class="cards card-grid">
+        {{range index .StoriesByCol "closed"}}
+        {{template "story_card.html" .}}
+        {{else}}
+        <div class="empty">No closed stories</div>
+        {{end}}
+      </div>
+    </details>
     {{end}}
   </section>
 
-  <aside id="detail-panel" class="detail-panel">
-    <div class="placeholder">
-      <h2>Select a story</h2>
-      <p>Open a card to edit its markdown description, review history, or close it manually.</p>
+  <dialog id="story-modal" class="story-modal" data-has-story="{{if .HasDetailStory}}true{{else}}false{{end}}">
+    <div class="story-modal-frame">
+      <button type="button" class="modal-close secondary-button" data-modal-close aria-label="Dismiss story modal">Dismiss</button>
+      <div id="story-modal-content">
+        {{if .HasDetailStory}}
+        {{template "story_panel.html" .Detail}}
+        {{end}}
+      </div>
     </div>
-  </aside>
+  </dialog>
+
+  <dialog id="folder-picker" class="folder-picker-modal">
+    <div class="folder-picker-frame">
+      <button type="button" class="modal-close secondary-button" data-folder-picker-close aria-label="Dismiss folder picker">Dismiss</button>
+      <div id="folder-picker-content"></div>
+    </div>
+  </dialog>
 </main>
+{{end}}
+
+{{define "agent_run_controls.html"}}
+<div id="agent-run-controls" class="agent-run-controls" data-running="{{if .Status.Running}}true{{else}}false{{end}}">
+  {{if .Status.Running}}
+  <span class="agent-status is-running">Running {{.Status.CurrentStoryID}}</span>
+  {{else if .Status.LastError}}
+  <details class="agent-error-details">
+    <summary>Last run failed</summary>
+    <div class="agent-error-panel">
+      <strong>{{.Status.Message}}</strong>
+      <p>{{.Status.LastError}}</p>
+    </div>
+  </details>
+  {{else if .Status.Message}}
+  <span class="agent-status">{{.Status.Message}}</span>
+  {{end}}
+
+  {{if .MissingPathProjects}}
+  <details class="path-needed">
+    <summary>Project path needed</summary>
+    <div class="path-needed-list">
+      {{range .MissingPathProjects}}
+      <form data-board-refresh-form hx-post="/projects/{{.ID}}/working-directory" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
+        <label>
+          {{.Name}} folder
+          <input name="workingDirectory" placeholder="/Users/adamm/path/to/repo" autocomplete="off">
+        </label>
+        <button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.ID}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Choose folder</button>
+        <button type="submit" class="secondary-button">Save</button>
+      </form>
+      {{end}}
+    </div>
+  </details>
+  {{end}}
+
+  <form data-board-refresh-form hx-post="/agent/run-queue" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
+    <button type="submit" class="run-button" {{if or .Status.Running (eq .QueuedCount 0) .MissingPathProjects}}disabled{{end}}>Run</button>
+  </form>
+  {{if .Status.Running}}
+  <form data-board-refresh-form hx-post="/agent/stop" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
+    <button type="submit" class="stop-button">Stop</button>
+  </form>
+  {{end}}
+</div>
+{{end}}
+
+{{define "agent_activity.html"}}
+<details id="agent-activity" class="agent-activity" data-preserve-details="agent-activity" {{if or .Status.Running .Status.LastError .Activity.LatestRun.Error}}open{{end}}>
+  <summary>
+    <span>Agent activity</span>
+    {{if .Status.Running}}
+    <strong>Running {{.Status.CurrentStoryID}}</strong>
+    {{else if .Activity.LatestRun.Status}}
+    <strong>{{.Activity.LatestRun.Status}}</strong>
+    {{else}}
+    <strong>Idle</strong>
+    {{end}}
+  </summary>
+  <div class="agent-activity-body">
+    {{if .Activity.LatestRun.ID}}
+    <div class="agent-run-summary">
+      <div>
+        <span>Run #{{.Activity.LatestRun.ID}}</span>
+        <strong>{{.Activity.LatestRun.Message}}</strong>
+      </div>
+      <div class="agent-progress">
+        <span>{{.Activity.LatestRun.Completed}} / {{.Activity.LatestRun.Total}}</span>
+        <progress value="{{.Activity.LatestRun.Completed}}" max="{{.Activity.LatestRun.Total}}"></progress>
+      </div>
+      {{if .Activity.LatestRun.Error}}
+      <pre>{{.Activity.LatestRun.Error}}</pre>
+      {{end}}
+    </div>
+    {{else}}
+    <p class="muted">No agent runs yet.</p>
+    {{end}}
+
+    <div class="agent-thread">
+      {{range .Activity.StoryRuns}}
+      <article class="agent-thread-item agent-thread-{{.Status}}">
+        <div class="agent-thread-topline">
+          <strong>{{.StoryID}}</strong>
+          <span>{{.Status}}</span>
+        </div>
+        {{if .StoryTitle}}<h4>{{.StoryTitle}}</h4>{{end}}
+        {{if .LogItems}}
+        <ol class="agent-log">
+          {{range .LogItems}}
+          <li class="agent-log-{{.Kind}}"><pre>{{.Text}}</pre></li>
+          {{end}}
+        </ol>
+        {{end}}
+        {{if .ExitError}}<pre>{{.ExitError}}</pre>{{end}}
+        {{if .FinalMessage}}<p>{{.FinalMessage}}</p>{{end}}
+        {{if .Stderr}}<details data-preserve-details="run-{{.ID}}-stderr"><summary>stderr</summary><pre>{{.Stderr}}</pre></details>{{end}}
+        {{if .Stdout}}<details data-preserve-details="run-{{.ID}}-stdout"><summary>stdout</summary><pre>{{.Stdout}}</pre></details>{{end}}
+      </article>
+      {{else}}
+      <p class="muted">Story-level logs will appear here once a run starts.</p>
+      {{end}}
+    </div>
+  </div>
+</details>
+{{end}}
+
+{{define "story_card.html"}}
+<article class="card card-{{.Status}}" data-story-id="{{.ID}}" hx-get="/stories/{{.ID}}/panel" hx-target="#story-modal-content" hx-swap="innerHTML">
+  <div class="card-topline">
+    <div class="card-id">{{.ID}}</div>
+    <span class="status-badge">{{statusTitle .Status}}</span>
+  </div>
+  <h3>{{.Title}}</h3>
+  <p>{{.ProjectName}}{{with .EpicName}} / {{.}}{{end}}</p>
+  <form data-board-refresh-form hx-post="/stories/{{.ID}}/status" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form" onclick="event.stopPropagation()">
+    <select name="status" onchange="this.form.requestSubmit()">
+      <option value="backlog" {{if eq .Status "backlog"}}selected{{end}}>Backlog</option>
+      <option value="queued" {{if eq .Status "queued"}}selected{{end}}>Queued</option>
+      <option value="in_progress" {{if eq .Status "in_progress"}}selected{{end}}>In Progress</option>
+      <option value="done" {{if eq .Status "done"}}selected{{end}}>Done</option>
+    </select>
+  </form>
+</article>
+{{end}}
+
+{{define "selectable_story_card.html"}}
+<article class="card card-{{.Status}}" data-story-id="{{.ID}}" hx-get="/stories/{{.ID}}/panel" hx-target="#story-modal-content" hx-swap="innerHTML">
+  <label class="select-card-checkbox" onclick="event.stopPropagation()">
+    <input class="backlog-select-checkbox" type="checkbox" name="storyId" value="{{.ID}}">
+    Select
+  </label>
+  <div class="card-topline">
+    <div class="card-id">{{.ID}}</div>
+    <span class="status-badge">{{statusTitle .Status}}</span>
+  </div>
+  <h3>{{.Title}}</h3>
+  <p>{{.ProjectName}}{{with .EpicName}} / {{.}}{{end}}</p>
+  <form data-board-refresh-form hx-post="/stories/{{.ID}}/status" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form" onclick="event.stopPropagation()">
+    <select name="status" onchange="this.form.requestSubmit()">
+      <option value="backlog" {{if eq .Status "backlog"}}selected{{end}}>Backlog</option>
+      <option value="queued" {{if eq .Status "queued"}}selected{{end}}>Queued</option>
+      <option value="in_progress" {{if eq .Status "in_progress"}}selected{{end}}>In Progress</option>
+      <option value="done" {{if eq .Status "done"}}selected{{end}}>Done</option>
+    </select>
+  </form>
+</article>
+{{end}}
+
+{{define "dashboard_panel.html"}}
+<div class="dashboard-panel">
+  {{if eq .Scope "epic"}}
+  <div class="dashboard-header">
+    <span class="dashboard-kicker">Epic dashboard</span>
+    <h2>{{.Epic.Name}}</h2>
+    <p>{{.Project.Name}} ({{.Project.Prefix}})</p>
+  </div>
+  <div class="metric-grid">
+    {{template "status_metrics.html" .Counts}}
+  </div>
+  {{template "completion_heatmap.html" .}}
+  <section class="dashboard-section">
+    <h3>Epic Details</h3>
+    {{if .Epic.Description}}
+    <div class="markdown">{{markdown .Epic.Description}}</div>
+    {{else}}
+    <p class="muted">No epic description yet.</p>
+    {{end}}
+  </section>
+  <dl class="detail-list">
+    <div>
+      <dt>Created</dt>
+      <dd>{{.Epic.CreatedAt.Format "2006-01-02 15:04"}}</dd>
+    </div>
+    <div>
+      <dt>Updated</dt>
+      <dd>{{.Epic.UpdatedAt.Format "2006-01-02 15:04"}}</dd>
+    </div>
+  </dl>
+  {{else if eq .Scope "project"}}
+  <div class="dashboard-header">
+    <span class="dashboard-kicker">Project dashboard</span>
+    <h2>{{.Project.Name}}</h2>
+    <p>{{.Project.Prefix}} project stats</p>
+  </div>
+  <section class="dashboard-section project-path-section">
+    <h3>Agent Working Directory</h3>
+    <form data-board-refresh-form hx-post="/projects/{{.Project.ID}}/working-directory" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
+      <input name="workingDirectory" value="{{.Project.WorkingDirectory}}" placeholder="/Users/adamm/path/to/repo" autocomplete="off">
+      <button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}{{if .Project.WorkingDirectory}}&path={{urlquery .Project.WorkingDirectory}}{{end}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Choose folder</button>
+      <button type="submit">Save path</button>
+    </form>
+    <p class="muted">Use the Git repo root or the folder where you normally start Codex for this project.</p>
+  </section>
+  <div class="metric-grid">
+    <div class="metric">
+      <span>Epics</span>
+      <strong>{{.EpicCount}}</strong>
+    </div>
+    {{template "status_metrics.html" .Counts}}
+  </div>
+  {{template "completion_heatmap.html" .}}
+  {{else}}
+  <div class="dashboard-header">
+    <span class="dashboard-kicker">Workspace dashboard</span>
+    <h2>All Projects</h2>
+    <p>Stats across the full task manager.</p>
+  </div>
+  <div class="metric-grid">
+    <div class="metric">
+      <span>Projects</span>
+      <strong>{{.ProjectCount}}</strong>
+    </div>
+    <div class="metric">
+      <span>Epics</span>
+      <strong>{{.EpicCount}}</strong>
+    </div>
+    {{template "status_metrics.html" .Counts}}
+  </div>
+  {{template "completion_heatmap.html" .}}
+  <section class="dashboard-section">
+    <h3>Projects</h3>
+    <div class="project-stat-list">
+      {{range .Projects}}
+      <div class="project-stat">
+        <div>
+          <strong>{{.Project.Name}}</strong>
+          <span>{{.Project.Prefix}} · {{.EpicCount}} epics</span>
+        </div>
+        <div class="mini-counts" aria-label="Story counts">
+          <span>B {{.Counts.Backlog}}</span>
+          <span>Q {{.Counts.Queued}}</span>
+          <span>IP {{.Counts.InProgress}}</span>
+          <span>D {{.Counts.Done}}</span>
+          <span>C {{.Counts.Closed}}</span>
+        </div>
+      </div>
+      {{else}}
+      <p class="muted">No projects yet.</p>
+      {{end}}
+    </div>
+  </section>
+  {{end}}
+</div>
+{{end}}
+
+{{define "completion_heatmap.html"}}
+<section class="dashboard-section">
+  <div class="section-heading">
+    <h3>Completion Heat Map</h3>
+    <span>{{.HeatmapTotal}} completed</span>
+  </div>
+  <div class="heatmap" aria-label="Daily completed story counts">
+    {{range .Heatmap}}
+    <span class="heatmap-day heatmap-level-{{.Level}}" title="{{.Date}}: {{.Count}} completed" aria-label="{{.Date}}: {{.Count}} completed"></span>
+    {{end}}
+  </div>
+  <div class="heatmap-legend" aria-hidden="true">
+    <span>Less</span>
+    <span class="heatmap-day heatmap-level-0"></span>
+    <span class="heatmap-day heatmap-level-1"></span>
+    <span class="heatmap-day heatmap-level-2"></span>
+    <span class="heatmap-day heatmap-level-3"></span>
+    <span class="heatmap-day heatmap-level-4"></span>
+    <span>More</span>
+  </div>
+</section>
+{{end}}
+
+{{define "status_metrics.html"}}
+<div class="metric">
+  <span>Total Stories</span>
+  <strong>{{.Total}}</strong>
+</div>
+<div class="metric">
+  <span>Backlog</span>
+  <strong>{{.Backlog}}</strong>
+</div>
+<div class="metric">
+  <span>Queued</span>
+  <strong>{{.Queued}}</strong>
+</div>
+<div class="metric">
+  <span>In Progress</span>
+  <strong>{{.InProgress}}</strong>
+</div>
+<div class="metric">
+  <span>Done</span>
+  <strong>{{.Done}}</strong>
+</div>
+<div class="metric">
+  <span>Closed</span>
+  <strong>{{.Closed}}</strong>
+</div>
+{{end}}
+
+{{define "folder_picker.html"}}
+<div class="folder-picker-panel">
+  <div class="folder-picker-header">
+    <div>
+      <span class="dashboard-kicker">Choose folder</span>
+      <h2>{{.Project.Name}}</h2>
+      <p>{{.Path}}</p>
+    </div>
+  </div>
+  {{if .Error}}
+  <p class="folder-picker-error">{{.Error}}</p>
+  {{end}}
+  <div class="folder-picker-actions">
+    {{if .Parent}}
+    <button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}&path={{urlquery .Parent}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Parent</button>
+    {{end}}
+    <button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}&path={{urlquery .Home}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Home</button>
+    <form data-board-refresh-form hx-post="/projects/{{.Project.ID}}/working-directory" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
+      <input type="hidden" name="workingDirectory" value="{{.Path}}">
+      <button type="submit">Use this folder</button>
+    </form>
+  </div>
+  <div class="folder-list">
+    {{range .Directories}}
+    <button type="button" class="folder-row" hx-get="/folder-picker?projectId={{$.Project.ID}}&path={{urlquery .Path}}" hx-target="#folder-picker-content" hx-swap="innerHTML">
+      <span>{{.Name}}</span>
+      <small>{{.Path}}</small>
+    </button>
+    {{else}}
+    <p class="muted">No visible child folders.</p>
+    {{end}}
+  </div>
+</div>
 {{end}}

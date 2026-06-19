@@ -5,16 +5,18 @@
     <h2>{{.Story.Title}}</h2>
     <p>{{.Story.ProjectName}}{{with .Story.EpicName}} / {{.}}{{end}}</p>
   </div>
-  <form hx-post="/stories/{{.Story.ID}}/close" hx-target="#board-shell" hx-swap="outerHTML">
-    <input name="closeComment" placeholder="Close comment">
-    <button type="submit">Close</button>
-  </form>
+  <div class="detail-actions">
+    <form data-board-refresh-form hx-post="/stories/{{.Story.ID}}/close" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
+      <input name="closeComment" placeholder="Close comment">
+      <button type="submit">Close</button>
+    </form>
+  </div>
 </div>
 
 <section class="description">
   <h3>Description</h3>
   <div class="markdown">{{markdown .Story.Description}}</div>
-  <form hx-post="/stories/{{.Story.ID}}/description" hx-target="#detail-panel" hx-swap="innerHTML">
+  <form hx-post="/stories/{{.Story.ID}}/description" hx-target="#story-modal-content" hx-swap="innerHTML">
     <textarea name="description" rows="10">{{.Story.Description}}</textarea>
     <button type="submit">Save description</button>
   </form>
