@@ -104,6 +104,15 @@ type Story struct {
 	CreatedAt     time.Time  `json:"createdAt"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
 	ClosedAt      *time.Time `json:"closedAt"`
+	QueuePosition *int       `json:"-"`
+}
+
+type QueueRunItem struct {
+	ID         int64
+	QueueRunID int64
+	Story      Story
+	Position   int
+	Status     string
 }
 
 type StoryEvent struct {
@@ -221,6 +230,56 @@ type AgentLogItem struct {
 	Text string
 }
 
+type PageData struct {
+	Page           string
+	Projects       []Project
+	Project        Project
+	Dashboard      DashboardData
+	Backlog        BacklogPageData
+	Run            RunPageData
+	HasDetailStory bool
+	Detail         StoryPanelData
+	CurrentAgent   AgentStatus
+	ActiveRun      QueueRunSummary
+}
+
+type BacklogPageData struct {
+	Project        Project
+	Epics          []Epic
+	Stories        []Story
+	Queued         []Story
+	SelectedEpic   string
+	SelectedStatus string
+	Counts         StatusCounts
+}
+
+type RunPageData struct {
+	Project     Project
+	Run         QueueRunSummary
+	Runs        []QueueRunSummary
+	Items       []QueueRunItem
+	LiveQueue   []Story
+	Activity    AgentActivityData
+	Agent       AgentStatus
+	MissingPath bool
+	Legacy      bool
+	Summary     RunCompletionSummary
+}
+
+type RunCompletionSummary struct {
+	Elapsed      string
+	AgentSteps   int
+	PullRequests []RunPullRequest
+}
+
+type RunPullRequest struct {
+	StoryID    string
+	StoryTitle string
+	Number     int
+	URL        string
+	Branch     string
+}
+
 type ProjectDashboard struct {
 	Project   Project
 	EpicCount int
@@ -244,8 +303,8 @@ type HeatmapDay struct {
 
 func main() {
 	var (
-		addr   = flag.String("addr", defaultEnv("TASKMANAGER_ADDR", ":8080"), "HTTP listen address")
-		dbPath = flag.String("db", defaultEnv("TASKMANAGER_DB", "taskmanager.db"), "SQLite database path")
+		addr   = flag.String("addr", defaultEnv("RIPPLE_ADDR", defaultEnv("TASKMANAGER_ADDR", ":8080")), "HTTP listen address")
+		dbPath = flag.String("db", defaultRippleDBPath(), "SQLite database path")
 	)
 	flag.Parse()
 
@@ -267,7 +326,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Printf("task manager listening on http://localhost%s", strings.TrimPrefix(*addr, "0.0.0.0"))
+	log.Printf("Ripple listening on http://localhost%s", strings.TrimPrefix(*addr, "0.0.0.0"))
 	log.Fatal(http.ListenAndServe(*addr, app.routes()))
 }
 
@@ -277,6 +336,7 @@ func NewApp(db *sql.DB) (*App, error) {
 		"statusTitle":   statusTitle,
 		"runKindTitle":  runKindTitle,
 		"runKindSource": runKindSource,
+		"truncateText":  truncate,
 		"markdown": func(s string) template.HTML {
 			var buf bytes.Buffer
 			if err := goldmark.Convert([]byte(s), &buf); err != nil {
@@ -303,8 +363,15 @@ func (a *App) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /static/", http.FileServerFS(embeddedFiles))
 
-	mux.HandleFunc("GET /", a.handleBoard)
+	mux.HandleFunc("GET /", a.handleDashboard)
+	mux.HandleFunc("GET /about", a.handleAbout)
+	mux.HandleFunc("GET /settings", a.handleSettings)
 	mux.HandleFunc("GET /board", a.handleBoardPartial)
+	mux.HandleFunc("GET /projects/{id}/backlog", a.handleProjectBacklog)
+	mux.HandleFunc("GET /projects/{id}/run", a.handleProjectRun)
+	mux.HandleFunc("GET /projects/{id}/run/content", a.handleProjectRunContent)
+	mux.HandleFunc("GET /projects/{id}/runs/{runID}", a.handleProjectRun)
+	mux.HandleFunc("POST /projects/{id}/queue/reorder", a.handleUIQueueReorder)
 	mux.HandleFunc("GET /stories/{id}/panel", a.handleStoryPanel)
 	mux.HandleFunc("POST /stories/{id}/status", a.handleUIStatus)
 	mux.HandleFunc("POST /stories/{id}/description", a.handleUIDescription)
@@ -334,6 +401,244 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /api/stories/{id}/events", a.handleAPIStoryEvents)
 
 	return logging(mux)
+}
+
+func (a *App) handleAbout(w http.ResponseWriter, r *http.Request) {
+	projects, err := a.listProjects(r.Context())
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	a.render(w, "layout.html", PageData{Page: "about", Projects: projects, CurrentAgent: a.currentAgentStatus()})
+}
+
+func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
+	projects, err := a.listProjects(r.Context())
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	a.render(w, "layout.html", PageData{Page: "settings", Projects: projects, CurrentAgent: a.currentAgentStatus()})
+}
+
+func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	projects, err := a.listProjects(r.Context())
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	dashboard, err := a.dashboardData(r.Context(), projects, "", "")
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	current := a.currentAgentStatus()
+	var activeRun QueueRunSummary
+	if current.Running && current.QueueRunID != 0 {
+		activeRun, _ = a.getQueueRun(r.Context(), current.QueueRunID)
+	}
+	a.render(w, "layout.html", PageData{Page: "dashboard", Projects: projects, Dashboard: dashboard, CurrentAgent: current, ActiveRun: activeRun})
+}
+
+func (a *App) handleProjectBacklog(w http.ResponseWriter, r *http.Request) {
+	data, err := a.projectBacklogPageData(r)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	a.render(w, "layout.html", data)
+}
+
+func (a *App) projectBacklogPageData(r *http.Request) (PageData, error) {
+	project, err := a.getProject(r.Context(), r.PathValue("id"))
+	if err != nil {
+		return PageData{}, err
+	}
+	projects, err := a.listProjects(r.Context())
+	if err != nil {
+		return PageData{}, err
+	}
+	epics, err := a.listEpics(r.Context(), project.ID)
+	if err != nil {
+		return PageData{}, err
+	}
+	epicID := strings.TrimSpace(r.URL.Query().Get("epicId"))
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	if status == "" {
+		status = StatusBacklog
+	}
+	if !validStatuses[status] {
+		return PageData{}, badRequest("invalid status filter")
+	}
+	projectStories, err := a.listStories(r.Context(), storyFilters{ProjectID: project.ID, ShowClosed: true})
+	if err != nil {
+		return PageData{}, err
+	}
+	all := projectStories
+	if epicID != "" {
+		all = []Story{}
+		for _, story := range projectStories {
+			if story.EpicID != nil && *story.EpicID == epicID {
+				all = append(all, story)
+			}
+		}
+	}
+	stories := []Story{}
+	queued := []Story{}
+	for _, story := range projectStories {
+		if story.Status == StatusQueued {
+			queued = append(queued, story)
+		}
+	}
+	for _, story := range all {
+		if story.Status == status {
+			stories = append(stories, story)
+		}
+	}
+	data := PageData{Page: "backlog", Projects: projects, Project: project, Backlog: BacklogPageData{
+		Project: project, Epics: epics, Stories: stories, Queued: queued, SelectedEpic: epicID, SelectedStatus: status, Counts: countStatuses(projectStories),
+	}, CurrentAgent: a.currentAgentStatus()}
+	if storyID := strings.TrimSpace(r.URL.Query().Get("storyId")); storyID != "" {
+		story, err := a.getStory(r.Context(), storyID)
+		if err == nil && story.ProjectID == project.ID {
+			events, eventErr := a.listEvents(r.Context(), story.ID)
+			if eventErr != nil {
+				return PageData{}, eventErr
+			}
+			data.HasDetailStory = true
+			data.Detail = StoryPanelData{Story: story, Events: events}
+		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return PageData{}, err
+		}
+	}
+	return data, nil
+}
+
+func (a *App) handleProjectRun(w http.ResponseWriter, r *http.Request) {
+	data, err := a.projectRunPageData(r)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	a.render(w, "layout.html", data)
+}
+
+func (a *App) handleProjectRunContent(w http.ResponseWriter, r *http.Request) {
+	data, err := a.projectRunPageData(r)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	a.render(w, "run_content.html", data)
+}
+
+func (a *App) projectRunPageData(r *http.Request) (PageData, error) {
+	project, err := a.getProject(r.Context(), r.PathValue("id"))
+	if err != nil {
+		return PageData{}, err
+	}
+	projects, err := a.listProjects(r.Context())
+	if err != nil {
+		return PageData{}, err
+	}
+	runs, err := a.listQueueRuns(r.Context(), project.ID)
+	if err != nil {
+		return PageData{}, err
+	}
+	var selected QueueRunSummary
+	rawRunID := strings.TrimSpace(r.PathValue("runID"))
+	if rawRunID == "" {
+		rawRunID = strings.TrimSpace(r.URL.Query().Get("runId"))
+	}
+	if raw := rawRunID; raw != "" {
+		var runID int64
+		if _, err := fmt.Sscanf(raw, "%d", &runID); err != nil {
+			return PageData{}, badRequest("invalid run id")
+		}
+		selected, err = a.getQueueRun(r.Context(), runID)
+		if err != nil {
+			return PageData{}, err
+		}
+		if selected.ProjectID != project.ID {
+			return PageData{}, sql.ErrNoRows
+		}
+	} else if r.URL.Query().Get("new") != "1" && len(runs) > 0 {
+		selected = runs[0]
+	}
+	queued, err := a.listStories(r.Context(), storyFilters{ProjectID: project.ID, Status: StatusQueued, ShowClosed: true})
+	if err != nil {
+		return PageData{}, err
+	}
+	runData := RunPageData{Project: project, Run: selected, Runs: runs, LiveQueue: queued, Agent: a.currentAgentStatus(), MissingPath: strings.TrimSpace(project.WorkingDirectory) == ""}
+	if selected.ID != 0 {
+		runData.Items, err = a.listQueueRunItems(r.Context(), selected.ID)
+		if err != nil {
+			return PageData{}, err
+		}
+		runData.Activity = AgentActivityData{LatestRun: selected}
+		runData.Activity.StoryRuns, err = a.listAgentStoryRuns(r.Context(), selected.ID)
+		if err != nil {
+			return PageData{}, err
+		}
+		if len(runData.Items) == 0 && len(runData.Activity.StoryRuns) > 0 {
+			runData.Legacy = true
+			seen := map[string]bool{}
+			for _, storyRun := range runData.Activity.StoryRuns {
+				if seen[storyRun.StoryID] {
+					continue
+				}
+				seen[storyRun.StoryID] = true
+				story, getErr := a.getStory(r.Context(), storyRun.StoryID)
+				if getErr == nil {
+					runData.Items = append(runData.Items, QueueRunItem{QueueRunID: selected.ID, Story: story, Position: len(runData.Items) + 1, Status: storyRun.Status})
+				}
+			}
+		}
+		runData.Summary = buildRunCompletionSummary(selected, runData.Activity.StoryRuns)
+	}
+	return PageData{Page: "run", Projects: projects, Project: project, Run: runData, CurrentAgent: a.currentAgentStatus()}, nil
+}
+
+func buildRunCompletionSummary(run QueueRunSummary, storyRuns []AgentRunSummary) RunCompletionSummary {
+	summary := RunCompletionSummary{AgentSteps: len(storyRuns)}
+	if run.FinishedAt != nil {
+		summary.Elapsed = formatElapsed(run.FinishedAt.Sub(run.StartedAt))
+	}
+	seen := map[string]bool{}
+	for _, storyRun := range storyRuns {
+		if storyRun.PRNumber == 0 || strings.TrimSpace(storyRun.PRURL) == "" {
+			continue
+		}
+		key := storyRun.PRURL
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		summary.PullRequests = append(summary.PullRequests, RunPullRequest{
+			StoryID: storyRun.StoryID, StoryTitle: storyRun.StoryTitle, Number: storyRun.PRNumber, URL: storyRun.PRURL, Branch: storyRun.Branch,
+		})
+	}
+	return summary
+}
+
+func formatElapsed(duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	seconds := int(duration.Round(time.Second).Seconds())
+	hours, seconds := seconds/3600, seconds%3600
+	minutes, seconds := seconds/60, seconds%60
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
+	}
+	return fmt.Sprintf("%ds", seconds)
 }
 
 func (a *App) migrate(ctx context.Context) error {
@@ -422,6 +727,15 @@ func (a *App) migrate(ctx context.Context) error {
 			updated_at TEXT NOT NULL,
 			UNIQUE(queue_run_id, story_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS queue_run_items (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			queue_run_id INTEGER NOT NULL REFERENCES queue_runs(id),
+			story_id TEXT NOT NULL REFERENCES stories(id),
+			position INTEGER NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			UNIQUE(queue_run_id, story_id),
+			UNIQUE(queue_run_id, position)
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := a.db.ExecContext(ctx, stmt); err != nil {
@@ -429,6 +743,16 @@ func (a *App) migrate(ctx context.Context) error {
 		}
 	}
 	if err := a.ensureColumn(ctx, "projects", "working_directory", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := a.ensureColumn(ctx, "stories", "queue_position", "INTEGER"); err != nil {
+		return err
+	}
+	if _, err := a.db.ExecContext(ctx, `WITH ranked AS (
+		SELECT id, ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY created_at, id) AS position
+		FROM stories WHERE status = ?
+	) UPDATE stories SET queue_position = (SELECT position FROM ranked WHERE ranked.id = stories.id)
+	WHERE status = ? AND queue_position IS NULL`, StatusQueued, StatusQueued); err != nil {
 		return err
 	}
 	agentColumns := map[string]string{
@@ -495,6 +819,15 @@ func (a *App) renderBoardPartial(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "board.html", data)
 }
 
+func (a *App) finishUIAction(w http.ResponseWriter, r *http.Request) {
+	redirect := strings.TrimSpace(r.FormValue("redirect"))
+	if strings.HasPrefix(redirect, "/") && !strings.HasPrefix(redirect, "//") {
+		http.Redirect(w, r, redirect, http.StatusSeeOther)
+		return
+	}
+	a.renderBoardPartial(w, r)
+}
+
 func (a *App) handleStoryPanel(w http.ResponseWriter, r *http.Request) {
 	story, err := a.getStory(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -523,7 +856,7 @@ func (a *App) handleUIStatus(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	a.renderBoardPartial(w, r)
+	a.finishUIAction(w, r)
 }
 
 func (a *App) handleUIDescription(w http.ResponseWriter, r *http.Request) {
@@ -547,7 +880,7 @@ func (a *App) handleUIClose(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	a.renderBoardPartial(w, r)
+	a.finishUIAction(w, r)
 }
 
 func (a *App) handleUICloseDone(w http.ResponseWriter, r *http.Request) {
@@ -564,7 +897,7 @@ func (a *App) handleUICloseDone(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	a.renderBoardPartial(w, r)
+	a.finishUIAction(w, r)
 }
 
 func (a *App) handleUIQueueBacklog(w http.ResponseWriter, r *http.Request) {
@@ -586,7 +919,7 @@ func (a *App) handleUIQueueBacklog(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err)
 			return
 		}
-		a.renderBoardPartial(w, r)
+		a.finishUIAction(w, r)
 		return
 	}
 	if len(r.Form["storyId"]) == 0 {
@@ -597,7 +930,62 @@ func (a *App) handleUIQueueBacklog(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	a.renderBoardPartial(w, r)
+	a.finishUIAction(w, r)
+}
+
+func (a *App) handleUIQueueReorder(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		httpError(w, err)
+		return
+	}
+	projectID := r.PathValue("id")
+	story, err := a.getStory(r.Context(), r.FormValue("storyId"))
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	if story.ProjectID != projectID || story.Status != StatusQueued || story.QueuePosition == nil {
+		httpError(w, badRequest("story is not in this project's queue"))
+		return
+	}
+	direction := r.FormValue("direction")
+	comparison, ordering := "<", "DESC"
+	if direction == "down" {
+		comparison, ordering = ">", "ASC"
+	} else if direction != "up" {
+		httpError(w, badRequest("direction must be up or down"))
+		return
+	}
+	var otherID string
+	var otherPosition int
+	err = a.db.QueryRowContext(r.Context(), `SELECT id, queue_position FROM stories WHERE project_id = ? AND status = ? AND queue_position `+comparison+` ? ORDER BY queue_position `+ordering+` LIMIT 1`,
+		projectID, StatusQueued, *story.QueuePosition).Scan(&otherID, &otherPosition)
+	if errors.Is(err, sql.ErrNoRows) {
+		a.finishUIAction(w, r)
+		return
+	}
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(r.Context(), `UPDATE stories SET queue_position = ? WHERE id = ?`, otherPosition, story.ID); err == nil {
+		_, err = tx.ExecContext(r.Context(), `UPDATE stories SET queue_position = ? WHERE id = ?`, *story.QueuePosition, otherID)
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	a.publishAgentEvent("board")
+	a.finishUIAction(w, r)
 }
 
 func (a *App) handleUIProjectWorkingDirectory(w http.ResponseWriter, r *http.Request) {
@@ -609,7 +997,7 @@ func (a *App) handleUIProjectWorkingDirectory(w http.ResponseWriter, r *http.Req
 		httpError(w, err)
 		return
 	}
-	a.renderBoardPartial(w, r)
+	a.finishUIAction(w, r)
 }
 
 func (a *App) handleUIFolderPicker(w http.ResponseWriter, r *http.Request) {
@@ -705,7 +1093,7 @@ func (a *App) handleUIRunQueue(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	a.renderBoardPartial(w, r)
+	a.finishUIAction(w, r)
 }
 
 func (a *App) handleUIStopAgent(w http.ResponseWriter, r *http.Request) {
@@ -713,12 +1101,12 @@ func (a *App) handleUIStopAgent(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	a.renderBoardPartial(w, r)
+	a.finishUIAction(w, r)
 }
 
 func (a *App) handleAPIRoot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":    "TheTaskManager API",
+		"name":    "Ripple API",
 		"docs":    "/api/docs",
 		"openapi": "/api/openapi.yaml",
 		"rules": map[string]any{
@@ -1218,8 +1606,14 @@ func (a *App) changeStoryStatus(ctx context.Context, id, status string, manualCl
 	if status == StatusClosed {
 		closedAt = formatTime(now)
 	}
-	_, err = a.db.ExecContext(ctx, `UPDATE stories SET status = ?, updated_at = ?, closed_at = ? WHERE id = ?`,
-		status, formatTime(now), closedAt, id)
+	if status == StatusQueued {
+		_, err = a.db.ExecContext(ctx, `UPDATE stories SET status = ?, updated_at = ?, closed_at = ?,
+			queue_position = COALESCE(queue_position, (SELECT COALESCE(MAX(queue_position), 0) + 1 FROM stories WHERE project_id = ? AND status = ?))
+			WHERE id = ?`, status, formatTime(now), closedAt, current.ProjectID, StatusQueued, id)
+	} else {
+		_, err = a.db.ExecContext(ctx, `UPDATE stories SET status = ?, updated_at = ?, closed_at = ?, queue_position = NULL WHERE id = ?`,
+			status, formatTime(now), closedAt, id)
+	}
 	if err != nil {
 		return err
 	}
@@ -1258,13 +1652,85 @@ func (a *App) closeDoneStories(ctx context.Context, filters storyFilters, commen
 	return nil
 }
 
-func (a *App) createQueueRun(ctx context.Context, filters storyFilters, total int) (int64, error) {
-	res, err := a.db.ExecContext(ctx, `INSERT INTO queue_runs (status, project_id, epic_id, total, completed, message, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"running", filters.ProjectID, filters.EpicID, total, 0, "Starting queued run", formatTime(time.Now().UTC()))
+func (a *App) createQueueRun(ctx context.Context, filters storyFilters, stories []Story) (int64, error) {
+	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO queue_runs (status, project_id, epic_id, total, completed, message, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"running", filters.ProjectID, filters.EpicID, len(stories), 0, "Starting queued run", formatTime(time.Now().UTC()))
+	if err != nil {
+		return 0, err
+	}
+	runID, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	for i, story := range stories {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO queue_run_items (queue_run_id, story_id, position, status) VALUES (?, ?, ?, 'pending')`, runID, story.ID, i+1); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return runID, nil
+}
+
+func (a *App) listQueueRunItems(ctx context.Context, queueRunID int64) ([]QueueRunItem, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT qi.id, qi.queue_run_id, qi.position, qi.status,
+		s.id, s.project_id, p.name, p.prefix, s.epic_id, e.name, s.title, s.description, s.status, s.close_comment, s.created_at, s.updated_at, s.closed_at, s.queue_position
+		FROM queue_run_items qi
+		JOIN stories s ON s.id = qi.story_id
+		JOIN projects p ON p.id = s.project_id
+		LEFT JOIN epics e ON e.id = s.epic_id
+		WHERE qi.queue_run_id = ? ORDER BY qi.position`, queueRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []QueueRunItem{}
+	for rows.Next() {
+		var item QueueRunItem
+		var epicID, epicName, closedAt sql.NullString
+		var queuePosition sql.NullInt64
+		var created, updated string
+		if err := rows.Scan(&item.ID, &item.QueueRunID, &item.Position, &item.Status,
+			&item.Story.ID, &item.Story.ProjectID, &item.Story.ProjectName, &item.Story.ProjectPrefix,
+			&epicID, &epicName, &item.Story.Title, &item.Story.Description, &item.Story.Status,
+			&item.Story.CloseComment, &created, &updated, &closedAt, &queuePosition); err != nil {
+			return nil, err
+		}
+		if epicID.Valid {
+			item.Story.EpicID = &epicID.String
+		}
+		if epicName.Valid {
+			item.Story.EpicName = &epicName.String
+		}
+		item.Story.CreatedAt = parseTime(created)
+		item.Story.UpdatedAt = parseTime(updated)
+		if closedAt.Valid {
+			t := parseTime(closedAt.String)
+			item.Story.ClosedAt = &t
+		}
+		if queuePosition.Valid {
+			p := int(queuePosition.Int64)
+			item.Story.QueuePosition = &p
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (a *App) updateQueueRunItemStatus(ctx context.Context, queueRunID int64, storyID, status string) error {
+	_, err := a.db.ExecContext(ctx, `UPDATE queue_run_items SET status = ? WHERE queue_run_id = ? AND story_id = ?`, status, queueRunID, storyID)
+	a.publishAgentEvent("activity")
+	return err
+}
+
+func (a *App) skipPendingQueueRunItems(ctx context.Context, queueRunID int64) {
+	_, _ = a.db.ExecContext(ctx, `UPDATE queue_run_items SET status = 'skipped' WHERE queue_run_id = ? AND status = 'pending'`, queueRunID)
 }
 
 func (a *App) updateQueueRun(ctx context.Context, id int64, status, message string, completed int, errValue error) error {
@@ -1405,13 +1871,39 @@ func (a *App) agentActivityData(ctx context.Context, projectID, epicID string) (
 	return AgentActivityData{LatestRun: run, StoryRuns: storyRuns}, nil
 }
 
+func (a *App) listQueueRuns(ctx context.Context, projectID string) ([]QueueRunSummary, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT id, status, project_id, epic_id, total, completed, message, error, started_at, finished_at
+		FROM queue_runs WHERE project_id = ? ORDER BY id DESC LIMIT 50`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs := []QueueRunSummary{}
+	for rows.Next() {
+		run, err := scanQueueRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func (a *App) getQueueRun(ctx context.Context, id int64) (QueueRunSummary, error) {
+	return scanQueueRun(a.db.QueryRowContext(ctx, `SELECT id, status, project_id, epic_id, total, completed, message, error, started_at, finished_at FROM queue_runs WHERE id = ?`, id))
+}
+
 func (a *App) listAgentStoryRuns(ctx context.Context, queueRunID int64) ([]AgentRunSummary, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT ar.id, ar.queue_run_id, ar.story_id, s.title, ar.run_kind, ar.status, ar.working_directory, ar.branch, ar.pr_number, ar.pr_url, ar.stdout, ar.stderr, ar.final_message, ar.exit_error, ar.started_at, ar.finished_at
+	rows, err := a.db.QueryContext(ctx, `SELECT ar.id, ar.queue_run_id, ar.story_id, s.title, ar.run_kind, ar.status, ar.working_directory,
+		COALESCE(NULLIF(ar.branch, ''), sp.branch, ''),
+		CASE WHEN ar.pr_number > 0 THEN ar.pr_number ELSE COALESCE(sp.pr_number, 0) END,
+		COALESCE(NULLIF(ar.pr_url, ''), sp.pr_url, ''),
+		ar.stdout, ar.stderr, ar.final_message, ar.exit_error, ar.started_at, ar.finished_at
 		FROM agent_runs ar
 		LEFT JOIN stories s ON s.id = ar.story_id
+		LEFT JOIN story_pipelines sp ON sp.queue_run_id = ar.queue_run_id AND sp.story_id = ar.story_id
 		WHERE ar.queue_run_id = ?
-		ORDER BY ar.id DESC
-		LIMIT 24`, queueRunID)
+		ORDER BY ar.id ASC`, queueRunID)
 	if err != nil {
 		return nil, err
 	}
@@ -1506,6 +1998,15 @@ func (a *App) publishAgentEvent(event string) {
 }
 
 func (a *App) startAgentQueueRun(ctx context.Context, filters storyFilters, baseURL string) error {
+	if strings.TrimSpace(filters.ProjectID) == "" {
+		return badRequest("project-scoped runs require a project")
+	}
+	a.agentMu.Lock()
+	if a.agentStatus.Running {
+		a.agentMu.Unlock()
+		return badRequest("agent queue is already running")
+	}
+	a.agentMu.Unlock()
 	queued, err := a.listStories(ctx, filters)
 	if err != nil {
 		return err
@@ -1533,17 +2034,18 @@ func (a *App) startAgentQueueRun(ctx context.Context, filters storyFilters, base
 	if _, err := resolveGhBinary(); err != nil {
 		return err
 	}
-	queueRunID, err := a.createQueueRun(ctx, filters, len(queued))
-	if err != nil {
-		return err
-	}
 	runCtx, cancel := context.WithCancel(context.Background())
-
 	a.agentMu.Lock()
 	if a.agentStatus.Running {
 		a.agentMu.Unlock()
 		cancel()
 		return badRequest("agent queue is already running")
+	}
+	queueRunID, err := a.createQueueRun(ctx, filters, queued)
+	if err != nil {
+		a.agentMu.Unlock()
+		cancel()
+		return err
 	}
 	a.agentStatus = AgentStatus{
 		Running:    true,
@@ -1557,41 +2059,44 @@ func (a *App) startAgentQueueRun(ctx context.Context, filters storyFilters, base
 	a.publishAgentEvent("activity")
 	a.publishAgentEvent("board")
 
-	runFilters := filters
-	go a.runAgentQueue(runCtx, queueRunID, runFilters, baseURL, len(queued))
+	go a.runAgentQueue(runCtx, queueRunID, baseURL, len(queued))
 	return nil
 }
 
-func (a *App) runAgentQueue(ctx context.Context, queueRunID int64, filters storyFilters, baseURL string, total int) {
+func (a *App) runAgentQueue(ctx context.Context, queueRunID int64, baseURL string, total int) {
 	previousSummary := ""
 	completed := 0
-	for {
+	items, err := a.listQueueRunItems(context.Background(), queueRunID)
+	if err != nil {
+		a.finishAgentRun(context.Background(), queueRunID, "failed", "Queue run failed", completed, err)
+		return
+	}
+	for _, item := range items {
 		if err := ctx.Err(); err != nil {
-			a.finishAgentRun(ctx, queueRunID, "stopped", "Queue run stopped", completed, err)
+			a.skipPendingQueueRunItems(context.Background(), queueRunID)
+			a.finishAgentRun(context.Background(), queueRunID, "stopped", "Queue run stopped", completed, err)
 			return
 		}
-		stories, err := a.listStories(ctx, filters)
-		if err != nil {
-			a.finishAgentRun(context.Background(), queueRunID, "failed", "Queue run failed", completed, err)
-			return
-		}
-		if len(stories) == 0 {
-			a.finishAgentRun(context.Background(), queueRunID, "completed", fmt.Sprintf("Queue run complete: %d/%d stories", completed, total), completed, nil)
-			return
-		}
-		story := stories[0]
+		story := item.Story
+		_ = a.updateQueueRunItemStatus(context.Background(), queueRunID, story.ID, "running")
 		project, err := a.getProject(ctx, story.ProjectID)
 		if err != nil {
+			_ = a.updateQueueRunItemStatus(context.Background(), queueRunID, story.ID, "failed")
+			a.skipPendingQueueRunItems(context.Background(), queueRunID)
 			a.finishAgentRun(context.Background(), queueRunID, "failed", "Queue run failed", completed, err)
 			return
 		}
 		if strings.TrimSpace(project.WorkingDirectory) == "" {
+			_ = a.updateQueueRunItemStatus(context.Background(), queueRunID, story.ID, "failed")
+			a.skipPendingQueueRunItems(context.Background(), queueRunID)
 			a.finishAgentRun(context.Background(), queueRunID, "failed", "Queue run paused", completed, fmt.Errorf("%s needs a project path", project.Name))
 			return
 		}
 		a.updateAgentProgress(story.ID, fmt.Sprintf("Running %s", story.ID), completed, total)
 		_ = a.updateQueueRun(context.Background(), queueRunID, "running", fmt.Sprintf("Running %s", story.ID), completed, nil)
 		if err := a.changeStoryStatus(ctx, story.ID, StatusInProgress, false, "Started by agent runner"); err != nil {
+			_ = a.updateQueueRunItemStatus(context.Background(), queueRunID, story.ID, "failed")
+			a.skipPendingQueueRunItems(context.Background(), queueRunID)
 			a.finishAgentRun(context.Background(), queueRunID, "failed", "Queue run failed", completed, err)
 			return
 		}
@@ -1612,26 +2117,32 @@ func (a *App) runAgentQueue(ctx context.Context, queueRunID int64, filters story
 				status = "stopped"
 				message = "Queue run stopped"
 			}
+			_ = a.updateQueueRunItemStatus(context.Background(), queueRunID, story.ID, status)
+			a.skipPendingQueueRunItems(context.Background(), queueRunID)
 			a.finishAgentRun(context.Background(), queueRunID, status, message, completed, fmt.Errorf("%s failed: %w", story.ID, err))
 			return
 		}
 		if err := a.changeStoryStatus(context.Background(), story.ID, StatusDone, false, "Marked done after PR merged"); err != nil {
+			_ = a.updateQueueRunItemStatus(context.Background(), queueRunID, story.ID, "failed")
+			a.skipPendingQueueRunItems(context.Background(), queueRunID)
 			_ = a.addEvent(ctx, story.ID, "agent_needs_review", "PR merged, but the app could not mark the story done")
 			a.finishAgentRun(context.Background(), queueRunID, "needs_review", "Queue run needs review", completed, fmt.Errorf("%s was not marked done: %w", story.ID, err))
 			return
 		}
 		a.publishAgentEvent("board")
 		completed++
+		_ = a.updateQueueRunItemStatus(context.Background(), queueRunID, story.ID, "completed")
 		previousSummary = summarizeFinalMessage(story, finalMessage)
 		_ = a.addEvent(ctx, story.ID, "agent_completed", "Story pipeline completed and PR merged")
 		a.updateAgentProgress("", fmt.Sprintf("Completed %s", story.ID), completed, total)
 		_ = a.updateQueueRun(context.Background(), queueRunID, "running", fmt.Sprintf("Completed %s", story.ID), completed, nil)
 		a.publishAgentEvent("board")
 	}
+	a.finishAgentRun(context.Background(), queueRunID, "completed", fmt.Sprintf("Queue run complete: %d/%d stories", completed, total), completed, nil)
 }
 
 func (a *App) runCodexForStoryWithKind(ctx context.Context, queueRunID int64, baseURL string, project Project, story Story, prompt, runKind, branch string, prNumber int, prURL string) (string, error) {
-	runDir := filepath.Join(os.TempDir(), "thetaskmanager", "runs")
+	runDir := filepath.Join(os.TempDir(), "ripple", "runs")
 	if err := os.MkdirAll(runDir, 0755); err != nil {
 		return "", err
 	}
@@ -1665,6 +2176,8 @@ func (a *App) runCodexForStoryWithKind(ctx context.Context, queueRunID int64, ba
 	cmd.Stdout = output.stdoutWriter()
 	cmd.Stderr = output.stderrWriter()
 	cmd.Env = append(os.Environ(),
+		"RIPPLE_BASE_URL="+baseURL,
+		"RIPPLE_STORY_ID="+story.ID,
 		"TASKMANAGER_BASE_URL="+baseURL,
 		"TASKMANAGER_STORY_ID="+story.ID,
 	)
@@ -2169,7 +2682,7 @@ func (a *App) getEpic(ctx context.Context, id string) (Epic, error) {
 }
 
 func (a *App) listStories(ctx context.Context, f storyFilters) ([]Story, error) {
-	query := `SELECT s.id, s.project_id, p.name, p.prefix, s.epic_id, e.name, s.title, s.description, s.status, s.close_comment, s.created_at, s.updated_at, s.closed_at
+	query := `SELECT s.id, s.project_id, p.name, p.prefix, s.epic_id, e.name, s.title, s.description, s.status, s.close_comment, s.created_at, s.updated_at, s.closed_at, s.queue_position
 		FROM stories s
 		JOIN projects p ON p.id = s.project_id
 		LEFT JOIN epics e ON e.id = s.epic_id`
@@ -2197,7 +2710,7 @@ func (a *App) listStories(ctx context.Context, f storyFilters) ([]Story, error) 
 	if len(where) > 0 {
 		query += ` WHERE ` + strings.Join(where, ` AND `)
 	}
-	query += ` ORDER BY s.created_at ASC`
+	query += ` ORDER BY CASE WHEN s.queue_position IS NULL THEN 1 ELSE 0 END, s.queue_position ASC, s.created_at ASC, s.id ASC`
 	rows, err := a.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -2215,7 +2728,7 @@ func (a *App) listStories(ctx context.Context, f storyFilters) ([]Story, error) 
 }
 
 func (a *App) getStory(ctx context.Context, id string) (Story, error) {
-	row := a.db.QueryRowContext(ctx, `SELECT s.id, s.project_id, p.name, p.prefix, s.epic_id, e.name, s.title, s.description, s.status, s.close_comment, s.created_at, s.updated_at, s.closed_at
+	row := a.db.QueryRowContext(ctx, `SELECT s.id, s.project_id, p.name, p.prefix, s.epic_id, e.name, s.title, s.description, s.status, s.close_comment, s.created_at, s.updated_at, s.closed_at, s.queue_position
 		FROM stories s
 		JOIN projects p ON p.id = s.project_id
 		LEFT JOIN epics e ON e.id = s.epic_id
@@ -2277,8 +2790,9 @@ func scanEpic(row rowScanner) (Epic, error) {
 func scanStory(row rowScanner) (Story, error) {
 	var s Story
 	var epicID, epicName, closedAt sql.NullString
+	var queuePosition sql.NullInt64
 	var created, updated string
-	if err := row.Scan(&s.ID, &s.ProjectID, &s.ProjectName, &s.ProjectPrefix, &epicID, &epicName, &s.Title, &s.Description, &s.Status, &s.CloseComment, &created, &updated, &closedAt); err != nil {
+	if err := row.Scan(&s.ID, &s.ProjectID, &s.ProjectName, &s.ProjectPrefix, &epicID, &epicName, &s.Title, &s.Description, &s.Status, &s.CloseComment, &created, &updated, &closedAt, &queuePosition); err != nil {
 		return Story{}, err
 	}
 	if epicID.Valid {
@@ -2292,6 +2806,10 @@ func scanStory(row rowScanner) (Story, error) {
 	if closedAt.Valid {
 		t := parseTime(closedAt.String)
 		s.ClosedAt = &t
+	}
+	if queuePosition.Valid {
+		position := int(queuePosition.Int64)
+		s.QueuePosition = &position
 	}
 	return s, nil
 }
@@ -2405,7 +2923,10 @@ func agentLogItems(run AgentRunSummary) []AgentLogItem {
 				if event.Item.ExitCode != nil {
 					status = fmt.Sprintf("Command exited %d", *event.Item.ExitCode)
 					if *event.Item.ExitCode != 0 {
-						kind = "error"
+						kind = "warning"
+						if run.Status != "completed" {
+							kind = "error"
+						}
 					}
 				}
 				detail := status + ": " + event.Item.Command
@@ -2419,8 +2940,12 @@ func agentLogItems(run AgentRunSummary) []AgentLogItem {
 	if strings.TrimSpace(run.ExitError) != "" {
 		add("error", run.ExitError)
 	}
-	if strings.TrimSpace(run.Stderr) != "" {
-		add("error", run.Stderr)
+	if stderr := displayAgentStderr(run.Stderr); stderr != "" {
+		kind := "warning"
+		if run.Status != "completed" {
+			kind = "error"
+		}
+		add(kind, stderr)
 	}
 	if strings.TrimSpace(run.FinalMessage) != "" {
 		add("summary", run.FinalMessage)
@@ -2429,6 +2954,18 @@ func agentLogItems(run AgentRunSummary) []AgentLogItem {
 		items = items[len(items)-24:]
 	}
 	return items
+}
+
+func displayAgentStderr(stderr string) string {
+	lines := strings.Split(stderr, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "Reading additional input from stdin..." {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
 func grokLogItems(run AgentRunSummary) []AgentLogItem {
@@ -2614,7 +3151,7 @@ func expandUserPath(path string) (string, error) {
 
 func resolveCodexBinary() (string, error) {
 	candidates := []string{}
-	if configured := strings.TrimSpace(os.Getenv("TASKMANAGER_CODEX_BIN")); configured != "" {
+	if configured := firstEnv("RIPPLE_CODEX_BIN", "TASKMANAGER_CODEX_BIN"); configured != "" {
 		candidates = append(candidates, configured)
 	}
 	candidates = append(candidates,
@@ -2639,7 +3176,7 @@ func resolveCodexBinary() (string, error) {
 			return path, nil
 		}
 	}
-	return "", badRequest("Codex CLI was not found. Set TASKMANAGER_CODEX_BIN to the codex executable path, for example /Applications/Codex.app/Contents/Resources/codex or /opt/homebrew/bin/codex.")
+	return "", badRequest("Codex CLI was not found. Set RIPPLE_CODEX_BIN to the codex executable path, for example /Applications/Codex.app/Contents/Resources/codex or /opt/homebrew/bin/codex.")
 }
 
 func isGitWorkTree(dir string) bool {
@@ -2718,6 +3255,28 @@ func defaultEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func defaultRippleDBPath() string {
+	if configured := firstEnv("RIPPLE_DB", "TASKMANAGER_DB"); configured != "" {
+		return configured
+	}
+	if _, err := os.Stat("ripple.db"); err == nil {
+		return "ripple.db"
+	}
+	if _, err := os.Stat("taskmanager.db"); err == nil {
+		return "taskmanager.db"
+	}
+	return "ripple.db"
 }
 
 func dbFilePath(path string) string {

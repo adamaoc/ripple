@@ -3,394 +3,162 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TheTaskManager</title>
+  <title>{{if .Project.Name}}{{.Project.Name}} · {{end}}Ripple</title>
+  <script>(()=>{const t=localStorage.getItem('ripple-theme')||localStorage.getItem('ttm-theme');if(t)document.documentElement.dataset.theme=t})()</script>
+  <link rel="icon" type="image/png" href="/static/Ripple.png">
   <link rel="stylesheet" href="/static/styles.css">
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <div class="brand-mark" aria-hidden="true">TT</div>
-      <div>
-        <h1>TheTaskManager</h1>
-        <p>Local kanban for humans, API-first task flow for agents.</p>
-      </div>
-    </div>
-    <nav>
-      <a href="/api" target="_blank">API</a>
-      <a href="/api/docs" target="_blank">Bot Docs</a>
-      <a href="/api/openapi.yaml" target="_blank">OpenAPI</a>
+  <aside class="app-rail" aria-label="Application navigation">
+    <a class="rail-logo has-tooltip" href="/" aria-label="Ripple" data-tooltip="Ripple"><img src="/static/Ripple.png" alt=""></a>
+    <nav class="rail-nav" aria-label="Primary navigation">
+      <a class="rail-link has-tooltip {{if eq .Page "dashboard"}}active{{end}}" href="/" aria-label="Dashboard" data-tooltip="Dashboard">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v7H4zM14 4h6v4h-6zM14 12h6v8h-6zM4 15h6v5H4z"/></svg>
+      </a>
+      {{if .Project.ID}}
+      <a class="rail-link has-tooltip {{if eq .Page "backlog"}}active{{end}}" href="/projects/{{.Project.ID}}/backlog" aria-label="Project backlog" data-tooltip="Backlog">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v4H5zM5 11h14v4H5zM5 17h14v2H5z"/></svg>
+      </a>
+      <a class="rail-link has-tooltip {{if eq .Page "run"}}active{{end}}" href="/projects/{{.Project.ID}}/run" aria-label="Run workspace" data-tooltip="Run">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>
+      </a>
+      {{end}}
     </nav>
-  </header>
+    <div class="rail-footer">
+      <a class="rail-link has-tooltip" href="/api/docs" target="_blank" rel="noopener" aria-label="API documentation" data-tooltip="API Docs">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h8l4 4v14H7zM15 3v5h5M10 12h6M10 16h6"/></svg>
+      </a>
+      <a class="rail-link has-tooltip {{if eq .Page "about"}}active{{end}}" href="/about" aria-label="About Ripple" data-tooltip="About">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 10v7M12 7v1"/></svg>
+      </a>
+      <a class="rail-link has-tooltip {{if eq .Page "settings"}}active{{end}}" href="/settings" aria-label="Settings" data-tooltip="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 14.5 21 16l-2 3-2.4-1a8 8 0 0 1-2.1 1.2L14 22h-4l-.5-2.8A8 8 0 0 1 7.4 18L5 19l-2-3 2-1.5a8 8 0 0 1 0-2.5L3 10l2-3 2.4 1a8 8 0 0 1 2.1-1.2L10 4h4l.5 2.8A8 8 0 0 1 16.6 8L19 7l2 3-2 2a8 8 0 0 1 0 2.5Z"/></svg>
+      </a>
+    </div>
+  </aside>
 
-  {{template "board.html" .}}
+  <div class="app-content">
+    {{if eq .Page "dashboard"}}{{template "dashboard.html" .}}{{end}}
+    {{if eq .Page "backlog"}}{{template "backlog.html" .}}{{end}}
+    {{if eq .Page "run"}}{{template "run.html" .}}{{end}}
+    {{if eq .Page "about"}}{{template "about.html" .}}{{end}}
+    {{if eq .Page "settings"}}{{template "settings.html" .}}{{end}}
+  </div>
+
   <script>
-    (() => {
-      let boardURLNeedsRefresh = false;
-      let agentEvents = null;
-      let agentEventsKey = "";
-      let activityRefreshPending = false;
-      let boardRefreshPending = false;
-      let deferredBoardRefresh = false;
+  (() => {
+    const root = document.documentElement;
+    const effectiveTheme = () => root.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    const syncThemeControls = () => {
+      const saved = localStorage.getItem('ripple-theme') || localStorage.getItem('ttm-theme') || 'system';
+      document.querySelectorAll('[data-theme-choice]').forEach((choice) => {
+        const active = choice.dataset.themeChoice === saved;
+        choice.classList.toggle('active', active);
+        choice.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+      const value = document.querySelector('[data-current-theme]');
+      if (value) value.textContent = saved === 'system' ? `System (${effectiveTheme()})` : saved[0].toUpperCase() + saved.slice(1);
+    };
+    document.querySelectorAll('[data-theme-choice]').forEach((choice) => choice.addEventListener('click', () => {
+      const next = choice.dataset.themeChoice;
+      localStorage.removeItem('ttm-theme');
+      if (next === 'system') { localStorage.removeItem('ripple-theme'); delete root.dataset.theme; }
+      else { localStorage.setItem('ripple-theme', next); root.dataset.theme = next; }
+      syncThemeControls();
+    }));
+    syncThemeControls();
 
-      function currentFilterParams() {
-        const params = new URLSearchParams();
-        const form = document.querySelector("[data-board-filter-form]");
-        if (!form) {
-          return params;
-        }
-        const data = new FormData(form);
-        const projectId = data.get("projectId");
-        const epicId = data.get("epicId");
-        if (projectId) {
-          params.set("projectId", projectId);
-        }
-        if (epicId) {
-          params.set("epicId", epicId);
-        }
-        if (data.get("showClosed") === "1") {
-          params.set("showClosed", "1");
-        }
-        return params;
+    document.querySelector('[data-copy-prompt]')?.addEventListener('click', async (event) => {
+      const prompt = document.querySelector('[data-agent-prompt]')?.textContent || '';
+      try {
+        await navigator.clipboard.writeText(prompt.trim());
+        const button = event.currentTarget;
+        button.textContent = 'Copied';
+        setTimeout(() => { button.textContent = 'Copy'; }, 1600);
+      } catch (_) {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(document.querySelector('[data-agent-prompt]'));
+        selection.removeAllRanges(); selection.addRange(range);
       }
+    });
 
-      function boardURL(params) {
-        const next = new URL(window.location.href);
-        next.pathname = "/";
-        next.search = params.toString();
-        next.hash = "";
-        return next;
-      }
+    const modal = document.getElementById('story-modal');
+    const folderModal = document.getElementById('folder-picker');
+    document.addEventListener('htmx:afterSwap', (event) => {
+      if (event.detail.target?.id === 'story-modal-content' && modal && !modal.open) modal.showModal();
+      if (event.detail.target?.id === 'folder-picker-content' && folderModal && !folderModal.open) folderModal.showModal();
+    });
+    document.querySelector('[data-modal-close]')?.addEventListener('click', () => modal?.close());
+    document.querySelector('[data-folder-picker-close]')?.addEventListener('click', () => folderModal?.close());
+    modal?.addEventListener('click', (event) => { if (event.target === modal) modal.close(); });
+    folderModal?.addEventListener('click', (event) => { if (event.target === folderModal) folderModal.close(); });
+    if (modal?.dataset.hasStory === 'true') modal.showModal();
+    document.addEventListener('submit', (event) => {
+      const form = event.target.closest('form[data-current-redirect]');
+      if (!form) return;
+      const input = form.querySelector('input[name="redirect"]');
+      if (input) input.value = location.pathname + location.search;
+    });
 
-      function replaceBoardURL() {
-        history.replaceState(null, "", boardURL(currentFilterParams()));
-      }
-
-      function pushStoryURL(storyId) {
-        const params = currentFilterParams();
-        params.set("storyId", storyId);
-        const next = boardURL(params);
-        if (next.href !== window.location.href) {
-          history.pushState(null, "", next);
-        }
-      }
-
-      function storyModal() {
-        return document.getElementById("story-modal");
-      }
-
-      function folderPickerModal() {
-        return document.getElementById("folder-picker");
-      }
-
-      function openStoryModal() {
-        const modal = storyModal();
-        if (modal && !modal.open) {
-          modal.showModal();
-        }
-      }
-
-      function openFolderPickerModal() {
-        const modal = folderPickerModal();
-        if (modal && !modal.open) {
-          modal.showModal();
-        }
-      }
-
-      function closeStoryModal() {
-        const modal = storyModal();
-        if (modal && modal.open) {
-          modal.close();
-        }
-      }
-
-      function closeFolderPickerModal() {
-        const modal = folderPickerModal();
-        if (modal && modal.open) {
-          modal.close();
-        }
-      }
-
-      function clearStoryURL() {
-        const params = currentFilterParams();
-        const next = boardURL(params);
-        if (next.href !== window.location.href) {
-          history.pushState(null, "", next);
-        }
-      }
-
-      function openRestoredStoryModal() {
-        const modal = storyModal();
-        if (modal && modal.dataset.hasStory === "true") {
-          openStoryModal();
-        }
-      }
-
-      function fragmentURL(path) {
-        const params = currentFilterParams();
-        const query = params.toString();
-        return query ? `${path}?${query}` : path;
-      }
-
-      function detailsState(root) {
-        const state = new Map();
-        if (!root) {
-          return state;
-        }
-        root.querySelectorAll("details[data-preserve-details]").forEach((details) => {
-          state.set(details.dataset.preserveDetails, details.open);
-        });
-        if (root.matches && root.matches("details[data-preserve-details]")) {
-          state.set(root.dataset.preserveDetails, root.open);
-        }
-        return state;
-      }
-
-      function restoreDetailsState(root, state) {
-        if (!root || !state.size) {
+    const runRoot = document.querySelector('[data-run-root]');
+    if (runRoot) {
+      let refreshing = false;
+      const syncCollapseButton = (rootNode = document) => {
+        const button = rootNode.querySelector('[data-collapse-all]');
+        if (!button) return;
+        const sections = [...rootNode.querySelectorAll('details[data-run-section]')];
+        button.textContent = sections.some((section) => section.open) ? 'Collapse all' : 'Expand all';
+      };
+      document.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-collapse-all]');
+        if (button) {
+          const rootNode = button.closest('[data-run-root]');
+          const sections = [...rootNode.querySelectorAll('details[data-run-section]')];
+          const shouldOpen = !sections.some((section) => section.open);
+          sections.forEach((section) => { section.open = shouldOpen; });
+          syncCollapseButton(rootNode);
           return;
         }
-        root.querySelectorAll("details[data-preserve-details]").forEach((details) => {
-          if (state.has(details.dataset.preserveDetails)) {
-            details.open = state.get(details.dataset.preserveDetails);
-          }
-        });
-        if (root.matches && root.matches("details[data-preserve-details]") && state.has(root.dataset.preserveDetails)) {
-          root.open = state.get(root.dataset.preserveDetails);
+        if (event.target.closest('details[data-run-section] > summary')) {
+          requestAnimationFrame(() => syncCollapseButton(event.target.closest('[data-run-root]')));
         }
-      }
-
-      function viewportBottom() {
-        return window.scrollY + window.innerHeight;
-      }
-
-      function isNearDocumentBottom() {
-        return document.documentElement.scrollHeight - viewportBottom() < 180;
-      }
-
-      function shouldFollowActivity(current) {
-        if (!current || !current.open) {
-          return false;
-        }
-        const body = current.querySelector(".agent-activity-body");
-        if (body) {
-          return body.scrollHeight - body.scrollTop - body.clientHeight < 120;
-        }
-        const rect = current.getBoundingClientRect();
-        const activityBottom = window.scrollY + rect.bottom;
-        return activityBottom - viewportBottom() < 220 || isNearDocumentBottom();
-      }
-
-      async function replaceFragment(path, selector, options = {}) {
-        const existing = document.querySelector(selector);
-        const oldScrollY = window.scrollY;
-        const oldDetails = options.preserveDetails ? detailsState(existing) : new Map();
-        const followActivity = options.followActivity ? shouldFollowActivity(existing) : false;
-        const scrollBox = options.scrollBoxSelector && existing ? existing.querySelector(options.scrollBoxSelector) : null;
-        const oldScrollTop = scrollBox ? scrollBox.scrollTop : 0;
-        const response = await fetch(fragmentURL(path), {
-          headers: { "HX-Request": "true" }
-        });
-        if (!response.ok) {
-          return;
-        }
-        const html = await response.text();
-        const template = document.createElement("template");
-        template.innerHTML = html.trim();
-        const next = template.content.firstElementChild;
-        const current = document.querySelector(selector);
-        if (!current || !next) {
-          return;
-        }
-        current.replaceWith(next);
-        restoreDetailsState(next, oldDetails);
-        if (window.htmx) {
-          window.htmx.process(next);
-        }
-        if (followActivity) {
-          requestAnimationFrame(() => {
-            const nextScrollBox = options.scrollBoxSelector ? next.querySelector(options.scrollBoxSelector) : null;
-            if (nextScrollBox) {
-              nextScrollBox.scrollTop = nextScrollBox.scrollHeight;
-            } else {
-              next.scrollIntoView({ block: "end" });
-            }
-          });
-        } else if (scrollBox && options.scrollBoxSelector) {
-          requestAnimationFrame(() => {
-            const nextScrollBox = next.querySelector(options.scrollBoxSelector);
-            if (nextScrollBox) {
-              nextScrollBox.scrollTop = oldScrollTop;
-            }
-          });
-        } else if (options.preserveScroll) {
-          window.scrollTo({ top: oldScrollY, left: window.scrollX });
-        }
-      }
-
-      function boardSwapIsBlocked() {
-        return Boolean(document.querySelector("#story-modal[open], #folder-picker[open], .path-needed[open], .agent-error-details[open]"));
-      }
-
-      async function refreshAgentChrome() {
-        if (activityRefreshPending) {
-          return;
-        }
-        activityRefreshPending = true;
+      });
+      const refresh = async () => {
+        if (refreshing) return;
+        refreshing = true;
+        const feed = document.querySelector('.transcript-scroll');
+        const follow = feed ? feed.scrollHeight - feed.scrollTop - feed.clientHeight < 120 : true;
+        const oldTop = feed?.scrollTop || 0;
+        const sectionState = new Map([...document.querySelectorAll('details[data-run-section]')].map((section) => [section.dataset.runSection, section.open]));
         try {
-          await replaceFragment("/agent/status", "#agent-run-controls", { preserveDetails: true });
-          await replaceFragment("/agent/activity", "#agent-activity", {
-            preserveDetails: true,
-            preserveScroll: true,
-            followActivity: true,
-            scrollBoxSelector: ".agent-activity-body"
+          const response = await fetch(runRoot.dataset.refreshUrl, {headers: {'HX-Request': 'true'}});
+          if (!response.ok) return;
+          const template = document.createElement('template');
+          template.innerHTML = (await response.text()).trim();
+          const next = template.content.firstElementChild;
+          const current = document.querySelector('[data-run-root]');
+          if (!next || !current) return;
+          current.replaceWith(next);
+          if (window.htmx) window.htmx.process(next);
+          next.querySelectorAll('details[data-run-section]').forEach((section) => {
+            if (sectionState.has(section.dataset.runSection)) section.open = sectionState.get(section.dataset.runSection);
           });
-        } finally {
-          activityRefreshPending = false;
-        }
-      }
-
-      async function refreshBoardFromStream() {
-        if (boardSwapIsBlocked()) {
-          deferredBoardRefresh = true;
-          await refreshAgentChrome();
-          return;
-        }
-        if (boardRefreshPending) {
-          return;
-        }
-        boardRefreshPending = true;
-        try {
-          await replaceFragment("/board", "#board-shell", {
-            preserveDetails: true,
-            preserveScroll: true
-          });
-          deferredBoardRefresh = false;
-          connectAgentEvents();
-        } finally {
-          boardRefreshPending = false;
-        }
-      }
-
-      function flushDeferredBoardRefresh() {
-        if (deferredBoardRefresh && !boardSwapIsBlocked()) {
-          refreshBoardFromStream();
-        }
-      }
-
-      function connectAgentEvents() {
-        if (!window.EventSource) {
-          return;
-        }
-        const key = currentFilterParams().toString();
-        if (agentEvents && agentEventsKey === key) {
-          return;
-        }
-        if (agentEvents) {
-          agentEvents.close();
-        }
-        agentEventsKey = key;
-        agentEvents = new EventSource(fragmentURL("/agent/events"));
-        agentEvents.addEventListener("activity", () => {
-          refreshAgentChrome();
-        });
-        agentEvents.addEventListener("board", () => {
-          refreshBoardFromStream();
-        });
-      }
-
-      function updateBulkSelection(section) {
-        if (!section) {
-          return;
-        }
-        const selected = section.querySelectorAll(".backlog-select-checkbox:checked").length;
-        const count = section.querySelector("[data-selected-count]");
-        const submit = section.querySelector("[data-bulk-selected-submit]");
-        if (count) {
-          count.textContent = selected;
-        }
-        if (submit) {
-          submit.disabled = selected === 0;
-        }
-      }
-
-      document.body.addEventListener("submit", (event) => {
-        if (event.target.matches("[data-board-filter-form], [data-board-refresh-form]")) {
-          boardURLNeedsRefresh = true;
-        }
-      });
-
-      document.body.addEventListener("click", (event) => {
-        const selectToggle = event.target.closest("[data-select-mode-toggle]");
-        if (selectToggle) {
-          const section = selectToggle.closest(".status-section");
-          section.classList.toggle("select-mode");
-          const selecting = section.classList.contains("select-mode");
-          selectToggle.textContent = selecting ? "Cancel selection" : "Select stories";
-          if (!selecting) {
-            section.querySelectorAll(".backlog-select-checkbox").forEach((checkbox) => {
-              checkbox.checked = false;
-            });
-          }
-          updateBulkSelection(section);
-          event.preventDefault();
-          event.stopPropagation();
-          return;
-        }
-        if (event.target.closest("[data-modal-close]")) {
-          closeStoryModal();
-          clearStoryURL();
-        }
-        if (event.target.closest("[data-folder-picker-close]")) {
-          closeFolderPickerModal();
-        }
-      });
-
-      document.body.addEventListener("click", (event) => {
-        const card = event.target.closest("[data-story-id]");
-        if (!card || event.target.closest("form")) {
-          return;
-        }
-        pushStoryURL(card.dataset.storyId);
-      });
-
-      document.body.addEventListener("change", (event) => {
-        if (event.target.matches(".backlog-select-checkbox")) {
-          updateBulkSelection(event.target.closest(".status-section"));
-        }
-      });
-
-      document.body.addEventListener("htmx:afterSwap", (event) => {
-        if (event.detail.target && event.detail.target.id === "board-shell" && boardURLNeedsRefresh) {
-          replaceBoardURL();
-          boardURLNeedsRefresh = false;
-          connectAgentEvents();
-        }
-        if (event.detail.target && event.detail.target.id === "story-modal-content") {
-          openStoryModal();
-        }
-        if (event.detail.target && event.detail.target.id === "folder-picker-content") {
-          openFolderPickerModal();
-        }
-      });
-
-      document.body.addEventListener("close", (event) => {
-        if (event.target && event.target.id === "story-modal") {
-          clearStoryURL();
-          flushDeferredBoardRefresh();
-        }
-        if (event.target && event.target.id === "folder-picker") {
-          flushDeferredBoardRefresh();
-        }
-      }, true);
-
-      window.addEventListener("popstate", () => {
-        window.location.reload();
-      });
-
-      openRestoredStoryModal();
-      connectAgentEvents();
-    })();
+          syncCollapseButton(next);
+          const nextFeed = next.querySelector('.transcript-scroll');
+          if (nextFeed) nextFeed.scrollTop = follow ? nextFeed.scrollHeight : oldTop;
+        } finally { refreshing = false; }
+      };
+      const events = new EventSource('/agent/events');
+      events.addEventListener('activity', refresh);
+      events.addEventListener('board', refresh);
+      window.addEventListener('beforeunload', () => events.close());
+      const feed = document.querySelector('.transcript-scroll');
+      if (feed) feed.scrollTop = feed.scrollHeight;
+      syncCollapseButton(runRoot);
+    }
+  })();
   </script>
 </body>
 </html>

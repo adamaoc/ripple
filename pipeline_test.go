@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+)
 
 func TestParseCreatedPRURL(t *testing.T) {
 	tests := []struct {
@@ -55,5 +60,17 @@ func TestRunKindSource(t *testing.T) {
 		if got := runKindSource(kind); got != want {
 			t.Errorf("runKindSource(%q) = %q, want %q", kind, got, want)
 		}
+	}
+}
+
+func TestQualityGateChecksIncludeBuildAndTypecheck(t *testing.T) {
+	dir := t.TempDir()
+	packageJSON := `{"scripts":{"test":"vitest run","lint":"eslint","typecheck":"tsc --noEmit","build":"vite build","format":"prettier --write ."}}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(packageJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"npm run test", "npm run lint", "npm run typecheck", "npm run build"}
+	if got := qualityGateChecks(dir); !reflect.DeepEqual(got, want) {
+		t.Fatalf("qualityGateChecks() = %#v, want %#v", got, want)
 	}
 }

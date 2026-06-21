@@ -1,6 +1,6 @@
-# TheTaskManager Bot API
+# Ripple Bot API
 
-TheTaskManager is a local task manager with a JSON API designed for chat bots and automation agents.
+Ripple is a local project backlog and agent runner with a JSON API designed for coding agents and automation.
 
 ## Discovery
 

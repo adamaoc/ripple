@@ -1,0 +1,54 @@
+{{define "backlog.html"}}
+<main class="page-shell backlog-page">
+  <header class="page-heading">
+    <div><span class="eyebrow">{{.Project.Prefix}} · Project backlog</span><h1>{{.Project.Name}}</h1><p>Shape the work, set the order, then move into a run.</p></div>
+    <a class="primary-button" href="/projects/{{.Project.ID}}/run?new=1">Open run queue <span aria-hidden="true">→</span></a>
+  </header>
+
+  <section class="backlog-grid">
+    <div class="backlog-main">
+      <section class="lined-panel filter-panel">
+        <form method="get" action="/projects/{{.Project.ID}}/backlog">
+          <select name="epicId" aria-label="Filter by epic" onchange="this.form.submit()"><option value="">Epics</option>{{range .Backlog.Epics}}<option value="{{.ID}}" {{if eq $.Backlog.SelectedEpic .ID}}selected{{end}}>{{.Name}}</option>{{end}}</select>
+          <input type="hidden" name="status" value="{{.Backlog.SelectedStatus}}">
+        </form>
+        <details class="project-settings"><summary><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 14.5 21 16l-2 3-2.4-1a8 8 0 0 1-2.1 1.2L14 22h-4l-.5-2.8A8 8 0 0 1 7.4 18L5 19l-2-3 2-1.5a8 8 0 0 1 0-2.5L3 10l2-3 2.4 1a8 8 0 0 1 2.1-1.2L10 4h4l.5 2.8A8 8 0 0 1 16.6 8L19 7l2 3-2 2a8 8 0 0 1 0 2.5Z"/></svg>Project settings</summary><form method="post" action="/projects/{{.Project.ID}}/working-directory"><input type="hidden" name="redirect" value="/projects/{{.Project.ID}}/backlog?status={{.Backlog.SelectedStatus}}"><label>Working directory<input name="workingDirectory" value="{{.Project.WorkingDirectory}}" placeholder="/path/to/repository"></label><div class="project-path-actions"><button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}{{if .Project.WorkingDirectory}}&path={{urlquery .Project.WorkingDirectory}}{{end}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Choose folder</button><button type="submit">Save path</button></div></form></details>
+      </section>
+
+      <nav class="status-tabs" aria-label="Story status">
+        <a class="{{if eq .Backlog.SelectedStatus "backlog"}}active{{end}}" href="?status=backlog{{if .Backlog.SelectedEpic}}&epicId={{.Backlog.SelectedEpic}}{{end}}">Backlog <span>{{.Backlog.Counts.Backlog}}</span></a>
+        <a class="{{if eq .Backlog.SelectedStatus "in_progress"}}active{{end}}" href="?status=in_progress{{if .Backlog.SelectedEpic}}&epicId={{.Backlog.SelectedEpic}}{{end}}">In progress <span>{{.Backlog.Counts.InProgress}}</span></a>
+        <a class="{{if eq .Backlog.SelectedStatus "done"}}active{{end}}" href="?status=done{{if .Backlog.SelectedEpic}}&epicId={{.Backlog.SelectedEpic}}{{end}}">Done <span>{{.Backlog.Counts.Done}}</span></a>
+        <a class="{{if eq .Backlog.SelectedStatus "closed"}}active{{end}}" href="?status=closed{{if .Backlog.SelectedEpic}}&epicId={{.Backlog.SelectedEpic}}{{end}}">Closed <span>{{.Backlog.Counts.Closed}}</span></a>
+      </nav>
+
+      <section class="lined-panel story-list-panel">
+        <form method="post" action="/stories/queue-backlog">
+          <input type="hidden" name="projectId" value="{{.Project.ID}}"><input type="hidden" name="epicId" value="{{.Backlog.SelectedEpic}}"><input type="hidden" name="redirect" value="/projects/{{.Project.ID}}/backlog?status={{.Backlog.SelectedStatus}}{{if .Backlog.SelectedEpic}}&epicId={{.Backlog.SelectedEpic}}{{end}}">
+          <div class="panel-heading"><div><span class="eyebrow">{{len .Backlog.Stories}} stories</span><h2>{{statusTitle .Backlog.SelectedStatus}}</h2></div>{{if eq .Backlog.SelectedStatus "backlog"}}<button type="submit">Queue selected</button>{{end}}</div>
+          <div class="table-wrap"><table class="data-table story-table"><thead><tr>{{if eq .Backlog.SelectedStatus "backlog"}}<th class="check-cell"><span class="sr-only">Select</span></th>{{end}}<th>ID</th><th>Story</th><th>Epic</th><th>Updated</th><th>Status</th></tr></thead><tbody>
+            {{range .Backlog.Stories}}<tr class="story-row" hx-get="/stories/{{.ID}}/panel" hx-target="#story-modal-content" hx-swap="innerHTML">
+              {{if eq $.Backlog.SelectedStatus "backlog"}}<td class="check-cell" onclick="event.stopPropagation()"><input type="checkbox" name="storyId" value="{{.ID}}" aria-label="Select {{.ID}}"></td>{{end}}
+              <td class="mono story-id">{{.ID}}</td><td><strong>{{.Title}}</strong><span class="row-subtitle">{{truncateText .Description 110}}</span></td><td>{{with .EpicName}}{{.}}{{else}}—{{end}}</td><td class="mono muted">{{.UpdatedAt.Format "Jan 02"}}</td>
+              <td onclick="event.stopPropagation()"><form method="post" action="/stories/{{.ID}}/status"><input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/backlog?status={{$.Backlog.SelectedStatus}}"><select name="status" onchange="this.form.submit()"><option value="backlog" {{if eq .Status "backlog"}}selected{{end}}>Backlog</option><option value="queued" {{if eq .Status "queued"}}selected{{end}}>Queued</option><option value="in_progress" {{if eq .Status "in_progress"}}selected{{end}}>In progress</option><option value="done" {{if eq .Status "done"}}selected{{end}}>Done</option></select></form></td>
+            </tr>{{else}}<tr><td colspan="6" class="empty-state">No stories in this view.</td></tr>{{end}}
+          </tbody></table></div>
+        </form>
+        {{if eq .Backlog.SelectedStatus "done"}}<form class="close-done-bar" method="post" action="/stories/close-done"><input type="hidden" name="projectId" value="{{.Project.ID}}"><input type="hidden" name="epicId" value="{{.Backlog.SelectedEpic}}"><input type="hidden" name="redirect" value="/projects/{{.Project.ID}}/backlog?status=done"><input name="closeComment" placeholder="Optional close comment"><button type="submit">Close all done</button></form>{{end}}
+      </section>
+    </div>
+
+    <aside class="queue-tray lined-panel">
+      <div class="panel-heading"><div><span class="eyebrow">Execution order</span><h2>Queued</h2></div><strong>{{len .Backlog.Queued}}</strong></div>
+      <ol class="queue-list">
+        {{range .Backlog.Queued}}<li><span class="queue-position">{{with .QueuePosition}}{{.}}{{end}}</span><div><strong class="mono">{{.ID}}</strong><span>{{.Title}}</span></div><div class="queue-actions"><form method="post" action="/projects/{{$.Project.ID}}/queue/reorder"><input type="hidden" name="storyId" value="{{.ID}}"><input type="hidden" name="direction" value="up"><input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/backlog"><button class="icon-button" title="Move up">↑</button></form><form method="post" action="/projects/{{$.Project.ID}}/queue/reorder"><input type="hidden" name="storyId" value="{{.ID}}"><input type="hidden" name="direction" value="down"><input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/backlog"><button class="icon-button" title="Move down">↓</button></form><form method="post" action="/stories/{{.ID}}/status"><input type="hidden" name="status" value="backlog"><input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/backlog"><button class="icon-button danger" title="Remove from queue">×</button></form></div></li>
+        {{else}}<li class="empty-state">Select backlog stories to build the next run.</li>{{end}}
+      </ol>
+      <a class="primary-button full-width {{if eq (len .Backlog.Queued) 0}}disabled{{end}}" href="/projects/{{.Project.ID}}/run?new=1">Review and run</a>
+    </aside>
+  </section>
+
+  <dialog id="story-modal" class="story-modal" data-has-story="{{if .HasDetailStory}}true{{else}}false{{end}}"><div class="modal-frame"><button type="button" class="modal-close icon-button" data-modal-close aria-label="Close">×</button><div id="story-modal-content">{{if .HasDetailStory}}{{template "story_panel.html" .Detail}}{{end}}</div></div></dialog>
+  <dialog id="folder-picker" class="folder-picker-modal"><div class="folder-picker-frame"><button type="button" class="modal-close icon-button" data-folder-picker-close aria-label="Close folder picker">×</button><div id="folder-picker-content"></div></div></dialog>
+</main>
+{{end}}

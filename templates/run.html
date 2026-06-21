@@ -1,0 +1,81 @@
+{{define "run.html"}}
+<main class="run-page">
+  {{template "run_content.html" .}}
+</main>
+{{end}}
+
+{{define "run_content.html"}}
+<div class="run-root" data-run-root data-refresh-url="/projects/{{.Project.ID}}/run/content{{if .Run.Run.ID}}?runId={{.Run.Run.ID}}{{else}}?new=1{{end}}">
+  <header class="run-header">
+    <div><span class="eyebrow">{{.Project.Prefix}} · Run workspace</span><h1>{{.Project.Name}}</h1></div>
+    <div class="run-header-controls">
+      {{if .Run.Runs}}<label class="history-select">History<select onchange="if(this.value) location.href=this.value"><option value="">Select run</option>{{range .Run.Runs}}<option value="/projects/{{$.Project.ID}}/runs/{{.ID}}" {{if eq $.Run.Run.ID .ID}}selected{{end}}>Run #{{.ID}} · {{.Status}} · {{.StartedAt.Format "Jan 02 15:04"}}</option>{{end}}</select></label>{{end}}
+      {{if .Run.Run.ID}}
+        {{if and .Run.Agent.Running (eq .Run.Agent.QueueRunID .Run.Run.ID)}}<form method="post" action="/agent/stop"><input type="hidden" name="redirect" value="/projects/{{.Project.ID}}/run"><button class="danger-button">Stop run</button></form>{{else}}<a class="secondary-button button-link" href="/projects/{{.Project.ID}}/run?new=1">Prepare new run</a>{{end}}
+      {{else}}
+        <form method="post" action="/agent/run-queue"><input type="hidden" name="projectId" value="{{.Project.ID}}"><input type="hidden" name="redirect" value="/projects/{{.Project.ID}}/run"><button type="submit" {{if or .Run.Agent.Running .Run.MissingPath (eq (len .Run.LiveQueue) 0)}}disabled{{end}}>Start run</button></form>
+      {{end}}
+    </div>
+  </header>
+
+  <div class="run-layout">
+    <aside class="run-sidebar">
+      <div class="run-sidebar-heading"><div><span class="eyebrow">{{if .Run.Run.ID}}Run #{{.Run.Run.ID}}{{else}}Ready queue{{end}}</span><h2>Stories</h2></div><strong>{{if .Run.Run.ID}}{{.Run.Run.Completed}}/{{.Run.Run.Total}}{{else}}{{len .Run.LiveQueue}}{{end}}</strong></div>
+      {{if .Run.Run.ID}}<progress value="{{.Run.Run.Completed}}" max="{{.Run.Run.Total}}"></progress>{{end}}
+      {{if .Run.Legacy}}<p class="inline-notice">Legacy run: only stories that reached execution are available.</p>{{end}}
+      {{if and (not .Run.Run.ID) .Run.MissingPath}}<p class="inline-notice error">Set this project's working directory in Backlog before starting.</p>{{end}}
+      {{if and (not .Run.Run.ID) .Run.Agent.Running}}<p class="inline-notice">Another project run is active. Only one run can execute at a time.</p>{{end}}
+      <ol class="run-queue">
+        {{if .Run.Run.ID}}
+          {{range .Run.Items}}<li class="item-{{.Status}}"><span class="run-item-index">{{.Position}}</span><div><strong class="mono">{{.Story.ID}}</strong><span>{{.Story.Title}}</span></div><span class="run-item-status">{{.Status}}</span></li>{{else}}<li class="empty-state">No stored run items.</li>{{end}}
+        {{else}}
+          {{range .Run.LiveQueue}}<li class="item-pending"><span class="run-item-index">{{with .QueuePosition}}{{.}}{{end}}</span><div><strong class="mono">{{.ID}}</strong><span>{{.Title}}</span></div><span class="run-item-status">pending</span></li>{{else}}<li class="empty-state">Queue stories from the project backlog first.</li>{{end}}
+        {{end}}
+      </ol>
+      <a class="sidebar-back" href="/projects/{{.Project.ID}}/backlog">← Edit project backlog</a>
+    </aside>
+
+    <section class="transcript-panel">
+      <div class="transcript-heading">
+        <div><span class="eyebrow">Activity stream</span><h2>{{if .Run.Run.ID}}{{.Run.Run.Message}}{{else}}Run ready{{end}}</h2></div>
+        <div class="transcript-heading-actions">{{if .Run.Run.ID}}<button type="button" class="secondary-button collapse-all-button" data-collapse-all>Collapse all</button><span class="status-label status-{{.Run.Run.Status}}"><i></i>{{.Run.Run.Status}}</span>{{end}}</div>
+      </div>
+      <div class="transcript-scroll">
+        {{if .Run.Run.ID}}
+          <details class="transcript-entry source-ripple" data-run-section="overview" open><summary><div class="entry-rail"><span>R</span></div><div class="entry-summary"><header><strong>Ripple</strong><time>{{.Run.Run.StartedAt.Format "Jan 02, 2006 · 15:04"}}</time></header><p>Run #{{.Run.Run.ID}} started with {{.Run.Run.Total}} queued stories.</p></div></summary><div class="entry-content">{{if .Run.Run.Error}}<pre class="error-output">{{.Run.Run.Error}}</pre>{{else}}<p class="muted">The queue snapshot was created and execution began in the order shown at left.</p>{{end}}</div></details>
+          {{range .Run.Activity.StoryRuns}}
+          <details class="transcript-entry source-{{runKindSource .RunKind}}" data-run-section="agent-{{.ID}}" open>
+            <summary><div class="entry-rail"><span>{{if eq (runKindSource .RunKind) "grok"}}G{{else}}C{{end}}</span></div><div class="entry-summary"><header><strong>{{if eq (runKindSource .RunKind) "grok"}}Grok review{{else}}Codex{{end}} · {{.StoryID}}</strong><time>{{.StartedAt.Format "15:04:05"}}</time></header><h3>{{.StoryTitle}}</h3><p class="entry-meta">{{runKindTitle .RunKind}}{{if .Branch}} · <span class="mono">{{.Branch}}</span>{{end}}{{if .PRNumber}} · <a href="{{.PRURL}}" target="_blank" rel="noopener" onclick="event.stopPropagation()">PR #{{.PRNumber}}</a>{{end}}</p></div></summary>
+            <div class="entry-content">
+              {{range .LogItems}}<div class="log-line log-{{.Kind}}"><span>{{.Kind}}</span><pre>{{.Text}}</pre></div>{{end}}
+              {{if .FinalMessage}}<div class="final-message">{{.FinalMessage}}</div>{{end}}
+              {{if or .Stdout .Stderr}}<details class="raw-output"><summary>Raw output</summary>{{if .Stdout}}<h4>stdout</h4><pre>{{.Stdout}}</pre>{{end}}{{if .Stderr}}<h4>stderr</h4><pre>{{.Stderr}}</pre>{{end}}</details>{{end}}
+            </div>
+          </details>
+          {{else}}<div class="transcript-empty"><span class="mono">&gt;_</span><h3>Waiting for the first agent event</h3><p>The transcript will build here as the run advances.</p></div>{{end}}
+          {{if .Run.Run.FinishedAt}}
+          <details class="run-completion-summary" data-run-section="completion" open>
+            <summary><div><span class="eyebrow">Run complete</span><h3>{{if eq .Run.Run.Status "completed"}}Work finished successfully{{else if eq .Run.Run.Status "stopped"}}Run was stopped{{else}}Run finished with an issue{{end}}</h3></div><span class="status-label status-{{.Run.Run.Status}}"><i></i>{{.Run.Run.Status}}</span></summary>
+            <div class="completion-content">
+            <div class="completion-stats">
+              <div><span>Stories completed</span><strong>{{.Run.Run.Completed}} / {{.Run.Run.Total}}</strong></div>
+              <div><span>Agent passes</span><strong>{{.Run.Summary.AgentSteps}}</strong></div>
+              <div><span>Pull requests</span><strong>{{len .Run.Summary.PullRequests}}</strong></div>
+              <div><span>Elapsed time</span><strong>{{.Run.Summary.Elapsed}}</strong></div>
+            </div>
+            {{if .Run.Summary.PullRequests}}
+            <div class="completion-prs"><h4>{{if eq .Run.Run.Status "completed"}}Pull requests created and merged{{else}}Pull requests created{{end}}</h4>
+              {{range .Run.Summary.PullRequests}}<a href="{{.URL}}" target="_blank" rel="noopener"><span><strong>{{.StoryID}} · PR #{{.Number}}</strong><small>{{.StoryTitle}}{{if .Branch}} · <span class="mono">{{.Branch}}</span>{{end}}</small></span><span aria-hidden="true">↗</span></a>{{end}}
+            </div>
+            {{else}}<p class="completion-empty">No pull request was recorded for this run.</p>{{end}}
+            </div>
+          </details>
+          {{end}}
+        {{else}}
+          <div class="transcript-empty"><span class="mono">&gt;_</span><h3>{{if .Run.LiveQueue}}Queue ready for execution{{else}}Nothing queued yet{{end}}</h3><p>{{if .Run.LiveQueue}}Review the ordered stories at left, then start the run.{{else}}Return to the backlog and queue the stories you want to execute.{{end}}</p></div>
+        {{end}}
+      </div>
+    </section>
+  </div>
+</div>
+{{end}}

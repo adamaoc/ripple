@@ -1,398 +1,258 @@
-# TheTaskManager
+<div align="center">
 
-TheTaskManager is a local, self-hosted task manager built around a simple kanban board and a bot-friendly JSON API.
+<img src="static/Ripple.png" alt="Ripple" width="112">
 
-The goal is to keep a long-running task service available on your machine so humans can review work visually while chat bots and coding agents can create, update, and move stories without needing a fresh explanation every time.
+# Ripple
 
-## Current Direction
+**Autonomous agent runs for real software tasks.**
 
-This project is intentionally small and local-first:
+A local-first task manager and agent orchestrator. Humans shape the backlog. Agents implement, review, and merge the work. You keep the context and the final say.
 
-- One Go application
-- SQLite for storage
-- Server-rendered HTML templates
-- HTMX for lightweight UI interactions
-- Plain CSS
-- JSON API for bots and agents
-- Bot-discoverable documentation served by the app
+[![Go](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![GitHub stars](https://img.shields.io/github/stars/adamaoc/ripple?style=flat)](https://github.com/adamaoc/ripple/stargazers)
+[![License](https://img.shields.io/badge/license-MIT-315f9d)](LICENSE)
 
-We chose this over a separate Go API plus SolidJS frontend because the app does not need complex client-side state, routing, or a frontend build pipeline. The priority is easy startup, easy self-hosting, and a durable local workflow.
+[Quick start](#quick-start) · [How it works](#how-it-works) · [API](#api-first-by-design) · [Contributing](#contributing)
 
-## Product Decisions
+</div>
 
-### Stories
+![Ripple autonomous run workspace](docs/images/ripple-run.png)
 
-A story is the main work item.
+## Stop babysitting the agent
 
-Stories have:
+Most coding-agent workflows still make you supervise every command. Ripple gives agents a durable backlog and a complete delivery loop, so you can direct the work instead of micromanaging the session.
 
-- Human-friendly ID
-- Title
-- Markdown description
-- Required project
-- Optional epic
-- Status
-- Event history
-- Optional close comment
+Queue one story or several. Ripple runs them in order and handles the machinery around each change:
 
-Story IDs are generated per project using that project's prefix:
-
-```txt
-TXG-001
-TXG-002
-RV-001
+```text
+Create branch → Implement → Commit → Push → Open PR
+      → Independent review → Address feedback → Quality gate → Merge
 ```
 
-Projects can define their own prefix. If a bot creates a story with a new `projectName` but no `projectPrefix`, the API chooses a short uppercase prefix from the project name.
+Every agent message, command, warning, review, and outcome stays visible in a structured run transcript. Automation does the work; transparency keeps it trustworthy.
 
-### Projects
+## Features
 
-Every story must belong to a project.
+- **Autonomous queue runs** — Execute an ordered set of stories from one action.
+- **Built-in review loop** — Codex implements and Grok independently reviews each pull request.
+- **Real delivery workflow** — Feature branches, commits, pull requests, review comments, quality gates, and merges are orchestrated for you.
+- **Human-controlled planning** — People decide what enters the queue and when completed work is closed.
+- **Durable agent context** — Markdown stories, event history, epics, and prior-run summaries survive individual chat sessions.
+- **Live, honest transcripts** — Follow agent activity in real time, with raw output retained for deeper inspection.
+- **Multi-project workspace** — Point projects at separate local Git repositories and manage them from one place.
+- **API-first task management** — Agents can discover the workflow and manage work through JSON and OpenAPI endpoints.
+- **Local-first by default** — One Go process, embedded UI, and a SQLite database you own.
+- **Focused interface** — Responsive light and dark themes with no frontend build step.
 
-Projects are created through the API, not through the UI. The UI only filters by project.
+## How it works
 
-### Epics
+Ripple separates human decisions from agent execution:
 
-Stories may belong to an epic, but it is not required.
+1. **Shape the backlog.** Create or enrich stories through the API, then review their Markdown descriptions in the UI.
+2. **Build the queue.** Select stories and place them in the exact order they should run.
+3. **Start once.** Ripple snapshots the queue and processes each story on its own feature branch.
+4. **Review automatically.** Grok reviews the pull-request diff. Actionable feedback triggers one Codex fix pass.
+5. **Enforce quality.** Available test, lint, typecheck, and build scripts must pass before merge.
+6. **Inspect the result.** The run workspace preserves the complete transcript, review summary, pull request, and outcome.
 
-Epics are created through the API, not through the UI. The UI only filters by epic.
+The story lifecycle stays simple:
 
-### Statuses
-
-Stories support five statuses:
-
-```txt
-backlog
-queued
-in_progress
-done
-closed
+```text
+backlog → queued → in_progress → done → closed
 ```
 
-The intended flow is:
+Agents work within `backlog`, `in_progress`, and `done`. Queueing and closing remain human decisions.
 
-```txt
-backlog -> queued -> in_progress -> done -> closed
-```
+## Quick start
 
-This flow is documented, but not rigidly locked between the bot-writable states. Bots can move a story directly between `backlog`, `in_progress`, and `done` when needed.
+### 1. Run Ripple
 
-Bots cannot move stories to `queued` or `closed`. Queued is currently a human-facing planning status, and closing is a manual human review action.
+Requirements for the app itself:
 
-In practice:
-
-- Bots should create stories in `backlog` unless there is a reason to do otherwise.
-- Bots should move active work to `in_progress`.
-- Bots should move completed work to `done`.
-- Humans close stories from the UI after review.
-
-### Closed Stories
-
-Closed stories are treated as archived.
-
-They are hidden by default on the board and in the default API story list. They can be shown with a UI toggle or API query.
-
-The UI supports:
-
-- Closing a single story
-- Adding a close comment
-- Closing all stories currently in the Done column
-
-Closing all done stories respects the current project and epic filters.
-
-### Deletion
-
-There is no story deletion in v1.
-
-Closed stories handle the archive case and preserve history.
-
-### Change History
-
-Story events are logged for important changes:
-
-- Story creation
-- Status changes
-- Detail updates
-- Epic changes
-- Close comments
-
-This is especially useful because bots and agents may make changes over time.
-
-## Running The App
-
-From the project directory:
+- [Go 1.24+](https://go.dev/doc/install)
+- Git
 
 ```bash
+git clone https://github.com/adamaoc/ripple.git
+cd ripple
 go run .
 ```
 
-Then open:
+Open [http://localhost:8080](http://localhost:8080). Ripple creates `ripple.db` in the current directory on first launch.
 
-```txt
-http://localhost:8080
-```
+### 2. Connect a project
 
-By default, the app creates and uses:
-
-```txt
-taskmanager.db
-```
-
-You can choose a different address or database path:
+Create a project and its first story through the API. `workingDirectory` must point to a clean local Git repository with an accessible GitHub remote.
 
 ```bash
-go run . -addr :8090 -db ~/taskmanager/taskmanager.db
+curl -X POST http://localhost:8080/api/stories \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "projectId": "my-app",
+    "projectName": "My App",
+    "projectPrefix": "APP",
+    "workingDirectory": "/absolute/path/to/my-app",
+    "title": "Add keyboard navigation",
+    "description": "Add keyboard navigation to the command menu.\n\n## Acceptance criteria\n- Arrow keys move focus\n- Enter selects an item\n- Existing pointer behavior remains unchanged"
+  }'
 ```
 
-You can also build a binary:
+You can change the working directory later from the project backlog UI.
 
-```bash
-go build -o taskmanager
-./taskmanager
-```
+### 3. Enable autonomous runs
 
-## Environment Variables
+Ripple currently uses three local command-line tools:
 
-The app also reads these optional environment variables:
+| Tool | Role | Check |
+| --- | --- | --- |
+| [Codex CLI](https://developers.openai.com/codex/cli/) | Implementation and review fixes | `codex --version` |
+| [Grok CLI](https://docs.x.ai/build/overview) | Independent pull-request review | `grok --version` |
+| [GitHub CLI](https://cli.github.com/) | Pull requests, comments, and merges | `gh auth status` |
 
-```txt
-TASKMANAGER_ADDR
-TASKMANAGER_DB
-```
+The tools must be installed and authenticated on the same machine as Ripple. Once they are ready, queue stories from the backlog, open the run workspace, and select **Start run**.
 
-Example:
+## API-first by design
 
-```bash
-TASKMANAGER_ADDR=:8090 TASKMANAGER_DB=~/taskmanager/taskmanager.db go run .
-```
+Ripple is not only a UI for humans. Its API is deliberately self-describing so a coding agent can learn the workflow without a custom integration prompt.
 
-The app reads environment variables as defaults. Explicit command-line flags take precedence.
-
-## UI
-
-The main UI is served at:
-
-```txt
-GET /
-```
-
-The board shows:
-
-- Backlog
-- In Progress
-- Done
-- Closed, only when enabled
-
-From the UI you can:
-
-- Filter by project
-- Filter by epic
-- Show or hide closed stories
-- Move stories between bot-writable statuses
-- Open a card detail panel
-- Edit a story description
-- Close one story manually
-- Close all done stories
-
-Project and epic management intentionally happen through the API only.
-
-## Bot API Discovery
-
-Bots should start with:
+Start at:
 
 ```http
 GET /api
 ```
 
-That response links to:
+The discovery response links to:
 
 ```http
 GET /api/docs
 GET /api/openapi.yaml
 ```
 
-The Markdown bot guide is also stored in:
-
-```txt
-docs/bot-api.md
-```
-
-The OpenAPI schema is stored in:
-
-```txt
-docs/openapi.yaml
-```
-
-The point is that a future chat bot can be pointed at the running service and discover how to create and manage tasks without you re-explaining the rules.
-
-## Common API Calls
-
-### Create A Project
+Common operations include:
 
 ```bash
-curl -X POST http://localhost:8080/api/projects \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "id": "txgarage",
-    "name": "TXGarage",
-    "prefix": "TXG"
-  }'
-```
-
-### Create A Story
-
-With an existing project:
-
-```bash
-curl -X POST http://localhost:8080/api/stories \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "projectId": "txgarage",
-    "title": "Add saved vehicle filter",
-    "description": "Add a **saved vehicles** filter.",
-    "status": "backlog"
-  }'
-```
-
-Letting the API create or reuse project and epic:
-
-```bash
-curl -X POST http://localhost:8080/api/stories \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "projectName": "Real View",
-    "projectPrefix": "RV",
-    "epicName": "Listing workflow",
-    "title": "Show listing preview before publish",
-    "description": "Render a **preview** before the listing goes live."
-  }'
-```
-
-### List Stories
-
-```bash
+# List active stories
 curl http://localhost:8080/api/stories
-```
 
-Filter by project:
+# Read one story and its history
+curl http://localhost:8080/api/stories/APP-001
+curl http://localhost:8080/api/stories/APP-001/events
 
-```bash
-curl 'http://localhost:8080/api/stories?projectId=txgarage'
-```
-
-Filter by epic:
-
-```bash
-curl 'http://localhost:8080/api/stories?epicId=txgarage-mobile-polish'
-```
-
-Filter by status:
-
-```bash
-curl 'http://localhost:8080/api/stories?status=in_progress'
-```
-
-Include closed stories:
-
-```bash
-curl 'http://localhost:8080/api/stories?showClosed=1'
-```
-
-### Move A Story
-
-```bash
-curl -X PATCH http://localhost:8080/api/stories/TXG-001/status \
+# Tell Ripple implementation has begun
+curl -X PATCH http://localhost:8080/api/stories/APP-001/status \
   -H 'Content-Type: application/json' \
-  -d '{
-    "status": "done"
-  }'
+  -d '{"status":"in_progress"}'
 ```
 
-Allowed bot statuses:
+See [`docs/bot-api.md`](docs/bot-api.md) for the agent-oriented guide and [`docs/openapi.yaml`](docs/openapi.yaml) for the full contract.
 
-```txt
-backlog
-in_progress
-done
+## Deliberately compact architecture
+
+Ripple is designed to be easy to understand, run, and contribute to:
+
+| Layer | Choice |
+| --- | --- |
+| Application | Go standard-library HTTP server |
+| Persistence | Embedded SQLite |
+| UI | Server-rendered HTML templates + HTMX |
+| Styling | Plain CSS with light and dark themes |
+| Agent integration | Local CLI processes with structured output |
+| API | JSON endpoints + embedded OpenAPI documentation |
+
+Templates, static assets, migrations, API docs, and the application are compiled into one Go binary. There is no Node runtime, asset pipeline, container, or external database required for Ripple itself.
+
+### Source map
+
+```text
+main.go                 HTTP server, storage, API, UI, run transcript
+pipeline.go             Git, GitHub, Codex, Grok, review, and merge pipeline
+main_test.go            Application and API tests
+pipeline_test.go        Pipeline behavior tests
+templates/              Server-rendered interface
+static/                 Styles and brand assets
+docs/bot-api.md         Agent-readable workflow guide
+docs/openapi.yaml       Machine-readable API contract
 ```
 
-The API rejects:
+## Configuration
 
-```txt
-closed
-```
+Flags override environment variables.
 
-### Update A Story
+| Purpose | Flag | Environment variable | Default |
+| --- | --- | --- | --- |
+| Listen address | `-addr` | `RIPPLE_ADDR` | `:8080` |
+| SQLite database | `-db` | `RIPPLE_DB` | `ripple.db` |
+| Codex executable | — | `RIPPLE_CODEX_BIN` | Auto-detected |
+| Grok executable | — | `RIPPLE_GROK_BIN` | Auto-detected |
+| GitHub CLI executable | — | `RIPPLE_GH_BIN` | `gh` from `PATH` |
+
+Examples:
 
 ```bash
-curl -X PATCH http://localhost:8080/api/stories/TXG-001 \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "description": "Updated Markdown description."
-  }'
+go run . -addr :8090 -db ~/ripple/ripple.db
+
+RIPPLE_ADDR=:8090 \
+RIPPLE_DB=~/ripple/ripple.db \
+RIPPLE_CODEX_BIN=/opt/homebrew/bin/codex \
+go run .
 ```
 
-### View Event History
+Build a standalone executable with:
 
 ```bash
-curl http://localhost:8080/api/stories/TXG-001/events
+go build -o ripple .
+./ripple
 ```
 
-## Source Layout
-
-```txt
-main.go                 Go server, handlers, services, migrations
-templates/layout.html   Page shell
-templates/board.html    Kanban board partial
-templates/story_panel.html
-static/styles.css       UI styles
-docs/bot-api.md         Human/agent-readable bot guide
-docs/openapi.yaml       Machine-readable API schema
-```
-
-This is deliberately compact for now. If the app grows, the likely next refactor would be splitting `main.go` into focused packages for storage, services, API handlers, and UI handlers.
-
-## Verification Commands
-
-Build:
+## Development
 
 ```bash
+# Run the test suite
+go test ./...
+
+# Static analysis
+go vet ./...
+
+# Format Go sources
+gofmt -w main.go main_test.go pipeline.go pipeline_test.go
+
+# Build everything
 go build ./...
 ```
 
-Format:
+## Security and scope
 
-```bash
-gofmt -w main.go
-```
+Ripple is intended for a trusted local development environment. It currently has no user authentication or authorization layer, and autonomous runs execute local tools with access to configured project directories.
 
-Basic API smoke test:
+Do not expose Ripple directly to the public internet. Review a story's scope before queueing it, keep project repositories clean, and inspect completed runs before treating the result as released software.
 
-```bash
-go run . -addr :8090 -db /tmp/thetaskmanager-smoke.db
-```
+Current intentional constraints:
 
-Then in another shell:
+- One autonomous queue run executes at a time.
+- Projects and epics are created through the API; their work is managed in the UI.
+- Stories are archived by closing them rather than deleting history.
+- GitHub is the supported pull-request provider.
+- Codex and Grok are the supported implementation/review pair today.
 
-```bash
-curl http://localhost:8090/api
-```
+## Contributing
 
-## Current Non-Goals
+Issues, ideas, and pull requests are welcome. For substantial changes, open an issue first so the product direction and implementation approach can be discussed before you invest deeply.
 
-- No login or authentication
-- No external database
-- No cloud hosting assumptions
-- No separate frontend build system
-- No project or epic editing in the UI
-- No story deletion
-- No strict status-transition lock between bot-writable states
+When submitting code:
 
-## Likely Next Improvements
+1. Keep the local-first, low-dependency architecture intact.
+2. Add or update tests for behavior changes.
+3. Run `go test ./...` and `go vet ./...`.
+4. Include screenshots for visible UI changes.
 
-- Add a small install/run script or launch agent for always-on local use
-- Add tests around status rules and ID generation
-- Add API endpoint examples to OpenAPI responses
-- Add search by text/title
-- Add due dates or priority only if they become useful
-- Add drag-and-drop once the board behavior is otherwise settled
+## License
+
+Ripple is available under the [MIT License](LICENSE).
+
+---
+
+<div align="center">
+
+Built by [Adam](https://github.com/adamaoc) for developers who would rather direct the work than babysit it.
+
+</div>

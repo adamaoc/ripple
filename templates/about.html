@@ -1,0 +1,49 @@
+{{define "about.html"}}
+<main class="page-shell about-page">
+  <header class="page-heading about-heading">
+    <div class="brand-heading brand-heading-about"><img class="brand-heading-icon" src="/static/Ripple.png" alt="Ripple app icon"><div><span class="eyebrow">Local-first agent workflow</span><h1>About Ripple</h1><p>A shared task system where humans plan and review work while coding agents implement it.</p></div></div>
+  </header>
+
+  <div class="about-layout">
+    <article class="about-content">
+      <section class="about-section">
+        <span class="section-number mono">01</span><div><h2>What it is</h2><p>Ripple is a self-hosted project backlog and agent runner. Stories provide durable context that survives individual coding sessions. Humans decide what enters the queue and what gets closed; agents can discover stories through the API, implement them, and report progress without needing the workflow explained from scratch each time.</p>
+        <div class="workflow-line" aria-label="Story workflow"><span>Backlog</span><i>→</i><span>Queued</span><i>→</i><span>In progress</span><i>→</i><span>Done</span><i>→</i><span>Closed</span></div></div>
+      </section>
+
+      <section class="about-section">
+        <span class="section-number mono">02</span><div><h2>How to use it</h2><ol class="about-steps"><li><strong>Create projects and stories through the API.</strong><span>Every story belongs to a project and may optionally belong to an epic.</span></li><li><strong>Shape a project backlog.</strong><span>Review story descriptions, filter the work, select stories, and arrange the queue in execution order.</span></li><li><strong>Start a run.</strong><span>The queue is frozen into a run. Codex implements each story, Grok reviews the work, and the transcript records commands, reviews, failures, and summaries.</span></li><li><strong>Review and close.</strong><span>Completed work moves to Done. A human verifies the result and closes the story, preserving its history.</span></li></ol></div>
+      </section>
+
+      <section class="about-section">
+        <span class="section-number mono">03</span><div><h2>Agent command-line requirements</h2><p>The built-in runner launches local command-line agents from each project's configured working directory. These tools must be installed and authenticated on the same machine running Ripple.</p>
+          <div class="requirement-list">
+            <div><header><span class="requirement-mark codex-mark mono">C</span><div><h3>Codex CLI</h3><span>Implementation and fixes</span></div></header><p>The runner uses non-interactive <code>codex exec</code> with JSON event output so activity can appear in the live transcript.</p><code class="command-line">codex --version</code><small>Override discovery with <code>RIPPLE_CODEX_BIN</code>.</small></div>
+            <div><header><span class="requirement-mark grok-mark mono">G</span><div><h3>Grok CLI</h3><span>Independent pull-request review</span></div></header><p>Grok reviews the proposed changes and returns approval or concrete review comments for Codex to address.</p><code class="command-line">grok --version</code><small>Override discovery with <code>RIPPLE_GROK_BIN</code>.</small></div>
+            <div><header><span class="requirement-mark gh-mark mono">GH</span><div><h3>GitHub CLI</h3><span>Pull requests and merge workflow</span></div></header><p>The <code>gh</code> CLI creates, inspects, and merges pull requests. It must be authenticated for the repository.</p><code class="command-line">gh auth status</code><small>Override discovery with <code>RIPPLE_GH_BIN</code>.</small></div>
+          </div>
+          <p class="about-note"><strong>Before a run:</strong> set the project working directory to its Git repository, make sure the repository has a clean working tree, and confirm its remote is accessible.</p>
+        </div>
+      </section>
+
+      <section class="about-section">
+        <span class="section-number mono">04</span><div><h2>Using the API with your own coding agent</h2><p>The API is intentionally discoverable. Point an agent at the API root first; it links to the human-readable guide and the OpenAPI description.</p>
+          <div class="endpoint-list"><a href="/api" target="_blank"><code>GET /api</code><span>Discovery and workflow rules</span></a><a href="/api/docs" target="_blank"><code>GET /api/docs</code><span>Bot-focused usage guide</span></a><a href="/api/openapi.yaml" target="_blank"><code>GET /api/openapi.yaml</code><span>Machine-readable API contract</span></a></div>
+          <h3 class="prompt-heading">Give this instruction to a coding agent</h3>
+          <div class="agent-prompt"><button type="button" class="copy-prompt secondary-button" data-copy-prompt>Copy</button><pre data-agent-prompt>You are working with Ripple at http://localhost:8080.
+
+Start by requesting GET /api. Read /api/docs and /api/openapi.yaml before changing task data. Find the requested story by ID, read its details and event history, and treat its description as the source of truth for the work.
+
+When you begin implementation, move the story to in_progress through the API. Keep your work scoped to that story, verify the result, then move it to done and summarize what changed. Do not move stories to queued or closed; those actions belong to the human workflow.</pre></div>
+          <p>An agent can also create a new backlog story through <code>POST /api/stories</code>. Give it the project ID or project name, a clear title, and a Markdown description containing the goal, context, constraints, and completion criteria.</p>
+        </div>
+      </section>
+    </article>
+
+    <aside class="about-aside">
+      <div class="lined-panel about-card"><span class="eyebrow">Built for</span><h2>Durable collaboration</h2><p>Small enough to run locally. Structured enough for multiple human and agent sessions to share the same source of truth.</p></div>
+      <div class="lined-panel creator-card"><span class="eyebrow">Created by</span><h2>Adam</h2><p>See more projects and follow development on GitHub.</p><a href="https://github.com/adamaoc" target="_blank" rel="noopener">github.com/adamaoc <span aria-hidden="true">↗</span></a></div>
+    </aside>
+  </div>
+</main>
+{{end}}

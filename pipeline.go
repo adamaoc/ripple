@@ -75,7 +75,7 @@ func storyBranchName(story Story) string {
 	if slug == "" {
 		slug = "work"
 	}
-	return fmt.Sprintf("taskmanager/%s-%s", story.ID, slug)
+	return fmt.Sprintf("ripple/%s-%s", story.ID, slug)
 }
 
 var branchSlugPattern = regexp.MustCompile(`[^a-z0-9]+`)
@@ -91,19 +91,19 @@ func slugifyBranchSegment(text string) string {
 }
 
 func resolveGhBinary() (string, error) {
-	if configured := strings.TrimSpace(os.Getenv("TASKMANAGER_GH_BIN")); configured != "" {
+	if configured := firstEnv("RIPPLE_GH_BIN", "TASKMANAGER_GH_BIN"); configured != "" {
 		return configured, nil
 	}
 	path, err := osexec.LookPath("gh")
 	if err != nil {
-		return "", badRequest("GitHub CLI (gh) was not found. Install gh and authenticate with `gh auth login`, or set TASKMANAGER_GH_BIN.")
+		return "", badRequest("GitHub CLI (gh) was not found. Install gh and authenticate with `gh auth login`, or set RIPPLE_GH_BIN.")
 	}
 	return path, nil
 }
 
 func resolveGrokBinary() (string, error) {
 	candidates := []string{}
-	if configured := strings.TrimSpace(os.Getenv("TASKMANAGER_GROK_BIN")); configured != "" {
+	if configured := firstEnv("RIPPLE_GROK_BIN", "TASKMANAGER_GROK_BIN"); configured != "" {
 		candidates = append(candidates, configured)
 	}
 	candidates = append(candidates,
@@ -128,7 +128,7 @@ func resolveGrokBinary() (string, error) {
 			return path, nil
 		}
 	}
-	return "", badRequest("Grok CLI was not found. Set TASKMANAGER_GROK_BIN to the grok executable path, for example ~/.grok/bin/grok.")
+	return "", badRequest("Grok CLI was not found. Set RIPPLE_GROK_BIN to the grok executable path, for example ~/.grok/bin/grok.")
 }
 
 func runCommand(ctx context.Context, dir string, name string, args ...string) (string, string, error) {
@@ -364,19 +364,7 @@ func ghPRMerge(ctx context.Context, ghBin, dir string, prNumber int) error {
 }
 
 func runQualityGate(ctx context.Context, dir string) error {
-	var checks []string
-	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-		checks = append(checks, "go test ./...")
-		checks = append(checks, "go vet ./...")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
-		if hasNPMScript(dir, "test") {
-			checks = append(checks, "npm test")
-		}
-		if hasNPMScript(dir, "lint") {
-			checks = append(checks, "npm run lint")
-		}
-	}
+	checks := qualityGateChecks(dir)
 	if len(checks) == 0 {
 		return nil
 	}
@@ -401,6 +389,22 @@ func runQualityGate(ctx context.Context, dir string) error {
 	return nil
 }
 
+func qualityGateChecks(dir string) []string {
+	var checks []string
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+		checks = append(checks, "go test ./...")
+		checks = append(checks, "go vet ./...")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+		for _, script := range []string{"test", "lint", "typecheck", "build"} {
+			if hasNPMScript(dir, script) {
+				checks = append(checks, "npm run "+script)
+			}
+		}
+	}
+	return checks
+}
+
 func hasNPMScript(dir, name string) bool {
 	data, err := os.ReadFile(filepath.Join(dir, "package.json"))
 	if err != nil {
@@ -418,18 +422,22 @@ func hasNPMScript(dir, name string) bool {
 
 func buildCodexImplementPrompt(baseURL, botDocs string, project Project, story Story, branch, previousSummary string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "You are being run by TheTaskManager to implement one queued story on a feature branch.\n\n")
+	fmt.Fprintf(&b, "You are being run by Ripple to implement one queued story on a feature branch.\n\n")
 	fmt.Fprintf(&b, "# Working Rules\n\n")
 	fmt.Fprintf(&b, "- You are already on feature branch `%s`. Do not create, rename, push, or merge branches.\n", branch)
-	fmt.Fprintf(&b, "- Do not open pull requests, push commits, or merge. TheTaskManager handles git and GitHub after you finish.\n")
+	fmt.Fprintf(&b, "- Do not open pull requests, push commits, or merge. Ripple handles git and GitHub after you finish.\n")
 	fmt.Fprintf(&b, "- Do not change story status through the API. The orchestrator marks the story done after the PR is merged.\n")
 	fmt.Fprintf(&b, "- Work only on the current story unless a tiny adjacent change is required.\n")
 	fmt.Fprintf(&b, "- Before editing, inspect the project structure and look for AGENTS.md, README files, styleguides, shared components, existing similar screens, routes, tests, and CSS patterns.\n")
 	fmt.Fprintf(&b, "- Follow the style and conventions of the existing app. Prefer existing helpers and patterns over new abstractions.\n")
 	fmt.Fprintf(&b, "- Run relevant tests and linting before finishing. If checks cannot run, explain why in your final response.\n")
+	fmt.Fprintf(&b, "- The sandbox may block network access, writes outside the project, and localhost servers. Do not repeatedly retry commands that fail for those reasons.\n")
+	fmt.Fprintf(&b, "- Do not use network-backed package loaders such as `pnpm dlx` or `npx` unless the required package is already cached. Prefer installed package sources and repository documentation.\n")
+	fmt.Fprintf(&b, "- If repository guidance references a missing file or unmatched glob, note it once and continue with the guidance that is available.\n")
+	fmt.Fprintf(&b, "- Do not launch a long-running development server for verification. Use finite tests and builds; explain any browser-test limitation in your final response.\n")
 	fmt.Fprintf(&b, "- Leave all completed work as local file changes. The orchestrator will commit and push after you finish.\n")
 	fmt.Fprintf(&b, "- If you cannot complete the work, explain the blocker in your final response.\n\n")
-	fmt.Fprintf(&b, "# TheTaskManager API\n\n")
+	fmt.Fprintf(&b, "# Ripple API\n\n")
 	fmt.Fprintf(&b, "Base URL: %s\n\n", baseURL)
 	fmt.Fprintf(&b, "Bot docs from %s/api/docs:\n\n%s\n\n", baseURL, botDocs)
 	if strings.TrimSpace(previousSummary) != "" {
@@ -448,25 +456,29 @@ func buildCodexImplementPrompt(baseURL, botDocs string, project Project, story S
 
 func buildCodexFixPrompt(baseURL, botDocs string, project Project, story Story, branch string, prNumber int, prURL, reviewJSON string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "You are being run by TheTaskManager to address one round of pull request review feedback.\n\n")
+	fmt.Fprintf(&b, "You are being run by Ripple to address one round of pull request review feedback.\n\n")
 	fmt.Fprintf(&b, "# Working Rules\n\n")
 	fmt.Fprintf(&b, "- You are on feature branch `%s` for PR #%d (%s).\n", branch, prNumber, prURL)
 	fmt.Fprintf(&b, "- Read the Grok review feedback below and address valid issues.\n")
 	fmt.Fprintf(&b, "- Do not merge the PR, change story status, or create a new branch.\n")
 	fmt.Fprintf(&b, "- Run relevant tests and linting and fix failures before finishing.\n")
+	fmt.Fprintf(&b, "- The sandbox may block network access, writes outside the project, and localhost servers. Do not repeatedly retry commands that fail for those reasons.\n")
+	fmt.Fprintf(&b, "- Do not use network-backed package loaders such as `pnpm dlx` or `npx` unless the required package is already cached. Prefer installed package sources and repository documentation.\n")
+	fmt.Fprintf(&b, "- If repository guidance references a missing file or unmatched glob, note it once and continue with the guidance that is available.\n")
 	fmt.Fprintf(&b, "- Leave all fixes as local file changes. The orchestrator will commit and push after you finish.\n\n")
 	fmt.Fprintf(&b, "# Grok Review Feedback\n\n%s\n\n", reviewJSON)
-	fmt.Fprintf(&b, "# TheTaskManager API\n\nBase URL: %s\n\nBot docs:\n\n%s\n\n", baseURL, botDocs)
+	fmt.Fprintf(&b, "# Ripple API\n\nBase URL: %s\n\nBot docs:\n\n%s\n\n", baseURL, botDocs)
 	fmt.Fprintf(&b, "# Story\n\nID: %s\nTitle: %s\n\nDescription:\n%s\n", story.ID, story.Title, story.Description)
 	return b.String()
 }
 
 func buildGrokReviewPrompt(story Story, prNumber int, prURL, diff string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "You are reviewing a pull request for TheTaskManager.\n\n")
+	fmt.Fprintf(&b, "You are reviewing a pull request for Ripple.\n\n")
 	fmt.Fprintf(&b, "Story: %s — %s\n", story.ID, story.Title)
 	fmt.Fprintf(&b, "PR: #%d %s\n\n", prNumber, prURL)
 	fmt.Fprintf(&b, "Review the diff for bugs, regressions, missing tests, style issues, and incomplete work.\n")
+	fmt.Fprintf(&b, "Review only the supplied diff. Do not modify files or invoke editing tools.\n")
 	fmt.Fprintf(&b, "Respond with JSON only, no markdown fences:\n")
 	fmt.Fprintf(&b, `{"approved":true,"summary":"short summary","comments":[{"path":"optional/file.go","line":0,"body":"actionable feedback"}]}`+"\n\n")
 	fmt.Fprintf(&b, "Set approved to true only if the change is ready to merge after tests pass.\n")
@@ -564,6 +576,8 @@ func (a *App) runGrokHeadless(ctx context.Context, queueRunID int64, baseURL str
 	cmd.Stdout = output.stdoutWriter()
 	cmd.Stderr = output.stderrWriter()
 	cmd.Env = append(os.Environ(),
+		"RIPPLE_BASE_URL="+baseURL,
+		"RIPPLE_STORY_ID="+story.ID,
 		"TASKMANAGER_BASE_URL="+baseURL,
 		"TASKMANAGER_STORY_ID="+story.ID,
 	)

@@ -1,0 +1,31 @@
+{{define "settings.html"}}
+<main class="page-shell settings-page">
+  <header class="page-heading settings-heading">
+    <div><span class="eyebrow">Application preferences</span><h1>Settings</h1><p>Configure how Ripple looks and behaves on this device.</p></div>
+  </header>
+
+  <div class="settings-layout">
+    <nav class="settings-nav" aria-label="Settings sections"><a class="active" href="#appearance">Appearance</a><span>More settings will be added as the application grows.</span></nav>
+    <div class="settings-content">
+      <section id="appearance" class="lined-panel settings-section">
+        <header><div><span class="eyebrow">Interface</span><h2>Appearance</h2><p>Choose a color mode. This preference is saved in this browser.</p></div><span class="current-setting" data-current-theme>System</span></header>
+        <div class="theme-options" role="group" aria-label="Color mode">
+          <button type="button" class="theme-option" data-theme-choice="light" aria-pressed="false">
+            <span class="theme-preview preview-light"><i></i><i></i><i></i></span><span><strong>Light</strong><small>Always use the light interface.</small></span><b aria-hidden="true">✓</b>
+          </button>
+          <button type="button" class="theme-option" data-theme-choice="dark" aria-pressed="false">
+            <span class="theme-preview preview-dark"><i></i><i></i><i></i></span><span><strong>Dark</strong><small>Always use the dark interface.</small></span><b aria-hidden="true">✓</b>
+          </button>
+          <button type="button" class="theme-option" data-theme-choice="system" aria-pressed="false">
+            <span class="theme-preview preview-system"><i></i><i></i><i></i></span><span><strong>System</strong><small>Follow your operating system setting.</small></span><b aria-hidden="true">✓</b>
+          </button>
+        </div>
+      </section>
+
+      <section class="lined-panel settings-section future-settings">
+        <header><div><span class="eyebrow">Coming later</span><h2>More controls</h2><p>Settings for runner behavior, notifications, and application defaults can live here as those capabilities are introduced.</p></div></header>
+      </section>
+    </div>
+  </div>
+</main>
+{{end}}

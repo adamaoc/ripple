@@ -1,0 +1,41 @@
+{{define "dashboard.html"}}
+<main class="page-shell">
+  <header class="page-heading">
+    <div class="brand-heading"><img class="brand-heading-icon" src="/static/Ripple.png" alt="Ripple app icon"><div><span class="eyebrow">Workspace</span><h1>Dashboard</h1><p>Projects, delivery health, and active work.</p></div></div>
+    {{if .CurrentAgent.Running}}<a class="run-indicator" href="/projects/{{.ActiveRun.ProjectID}}/run"><span></span>Run active · {{.CurrentAgent.CurrentStoryID}}</a>{{end}}
+  </header>
+
+  <section class="metric-strip" aria-label="Workspace metrics">
+    <div><span>Projects</span><strong>{{.Dashboard.ProjectCount}}</strong></div>
+    <div><span>Stories</span><strong>{{.Dashboard.Counts.Total}}</strong></div>
+    <div><span>Queued</span><strong>{{.Dashboard.Counts.Queued}}</strong></div>
+    <div><span>In progress</span><strong>{{.Dashboard.Counts.InProgress}}</strong></div>
+    <div><span>Done</span><strong>{{.Dashboard.Counts.Done}}</strong></div>
+  </section>
+
+  <section class="lined-panel activity-panel">
+    <div class="panel-heading"><div><span class="eyebrow">Last 90 days</span><h2>Completion activity</h2></div><strong>{{.Dashboard.HeatmapTotal}} completed</strong></div>
+    <div class="heatmap" aria-label="Daily completed story counts">
+      {{range .Dashboard.Heatmap}}<span class="heatmap-day level-{{.Level}}" title="{{.Date}}: {{.Count}} completed"></span>{{end}}
+    </div>
+  </section>
+
+  <section class="lined-panel">
+    <div class="panel-heading"><div><span class="eyebrow">{{len .Dashboard.Projects}} total</span><h2>Projects</h2></div><span class="muted">Projects and epics are created through the API</span></div>
+    <div class="table-wrap">
+      <table class="data-table project-table">
+        <thead><tr><th>Project</th><th>Prefix</th><th>Backlog</th><th>Queued</th><th>Active</th><th>Done</th><th>Closed</th><th></th></tr></thead>
+        <tbody>
+          {{range .Dashboard.Projects}}
+          <tr>
+            <td><a class="row-title" href="/projects/{{.Project.ID}}/backlog">{{.Project.Name}}</a><span class="row-subtitle">{{.EpicCount}} epics{{if .Project.WorkingDirectory}} · path ready{{else}} · path needed{{end}}</span></td>
+            <td class="mono">{{.Project.Prefix}}</td><td>{{.Counts.Backlog}}</td><td>{{.Counts.Queued}}</td><td>{{.Counts.InProgress}}</td><td>{{.Counts.Done}}</td><td>{{.Counts.Closed}}</td>
+            <td class="row-actions"><a href="/projects/{{.Project.ID}}/backlog">Backlog</a><a href="/projects/{{.Project.ID}}/run">Run</a></td>
+          </tr>
+          {{else}}<tr><td colspan="8" class="empty-state">No projects yet. Create the first project through the API.</td></tr>{{end}}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+{{end}}

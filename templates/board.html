@@ -210,7 +210,7 @@
     <div class="agent-run-summary">
       <div>
         <span class="agent-summary-identity">
-          <span class="agent-source-badge agent-source-taskmanager" aria-label="TaskManager"><span aria-hidden="true">TM</span> TaskManager</span>
+          <span class="agent-source-badge agent-source-ripple" aria-label="Ripple"><span aria-hidden="true">R</span> Ripple</span>
           Run #{{.Activity.LatestRun.ID}}
         </span>
         <strong>{{.Activity.LatestRun.Message}}</strong>
@@ -366,7 +366,7 @@
   <div class="dashboard-header">
     <span class="dashboard-kicker">Workspace dashboard</span>
     <h2>All Projects</h2>
-    <p>Stats across the full task manager.</p>
+    <p>Stats across the full Ripple workspace.</p>
   </div>
   <div class="metric-grid">
     <div class="metric">
@@ -460,7 +460,7 @@
 <div class="folder-picker-panel">
   <div class="folder-picker-header">
     <div>
-      <span class="dashboard-kicker">Choose folder</span>
+      <span class="eyebrow">Choose folder</span>
       <h2>{{.Project.Name}}</h2>
       <p>{{.Path}}</p>
     </div>
@@ -473,8 +473,9 @@
     <button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}&path={{urlquery .Parent}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Parent</button>
     {{end}}
     <button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}&path={{urlquery .Home}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Home</button>
-    <form data-board-refresh-form hx-post="/projects/{{.Project.ID}}/working-directory" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
+    <form method="post" action="/projects/{{.Project.ID}}/working-directory">
       <input type="hidden" name="workingDirectory" value="{{.Path}}">
+      <input type="hidden" name="redirect" value="/projects/{{.Project.ID}}/backlog">
       <button type="submit">Use this folder</button>
     </form>
   </div>

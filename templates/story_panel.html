@@ -1,19 +1,20 @@
 {{define "story_panel.html"}}
-<div class="detail-header">
+<div class="story-detail-header">
   <div>
-    <span class="card-id">{{.Story.ID}}</span>
+    <span class="eyebrow mono">{{.Story.ID}} · {{statusTitle .Story.Status}}</span>
     <h2>{{.Story.Title}}</h2>
     <p>{{.Story.ProjectName}}{{with .Story.EpicName}} / {{.}}{{end}}</p>
   </div>
   <div class="detail-actions">
-    <form data-board-refresh-form hx-post="/stories/{{.Story.ID}}/close" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
+    <form method="post" action="/stories/{{.Story.ID}}/close" data-current-redirect>
+      <input type="hidden" name="redirect">
       <input name="closeComment" placeholder="Close comment">
       <button type="submit">Close</button>
     </form>
   </div>
 </div>
 
-<section class="description">
+<section class="story-detail-section description">
   <h3>Description</h3>
   <div class="markdown">{{markdown .Story.Description}}</div>
   <form hx-post="/stories/{{.Story.ID}}/description" hx-target="#story-modal-content" hx-swap="innerHTML">
@@ -22,7 +23,7 @@
   </form>
 </section>
 
-<section class="events">
+<section class="story-detail-section events">
   <h3>History</h3>
   {{range .Events}}
   <div class="event">

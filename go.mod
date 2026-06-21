@@ -1,4 +1,4 @@
-module thetaskmanager
+module ripple
 
 go 1.24
 
