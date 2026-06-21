@@ -209,7 +209,10 @@
     {{if .Activity.LatestRun.ID}}
     <div class="agent-run-summary">
       <div>
-        <span>Run #{{.Activity.LatestRun.ID}}</span>
+        <span class="agent-summary-identity">
+          <span class="agent-source-badge agent-source-taskmanager" aria-label="TaskManager"><span aria-hidden="true">TM</span> TaskManager</span>
+          Run #{{.Activity.LatestRun.ID}}
+        </span>
         <strong>{{.Activity.LatestRun.Message}}</strong>
       </div>
       <div class="agent-progress">
@@ -226,12 +229,24 @@
 
     <div class="agent-thread">
       {{range .Activity.StoryRuns}}
-      <article class="agent-thread-item agent-thread-{{.Status}}">
+      <article class="agent-thread-item agent-thread-{{.Status}} agent-work-{{runKindSource .RunKind}}">
         <div class="agent-thread-topline">
-          <strong>{{.StoryID}}</strong>
+          <div class="agent-thread-identity">
+            {{if eq (runKindSource .RunKind) "grok"}}
+            <span class="agent-source-badge agent-source-grok"><span aria-hidden="true">✦</span> Grok</span>
+            {{else}}
+            <span class="agent-source-badge agent-source-codex"><span aria-hidden="true">&gt;_</span> Codex</span>
+            {{end}}
+            <strong>{{.StoryID}}</strong>
+          </div>
           <span>{{.Status}}</span>
         </div>
         {{if .StoryTitle}}<h4>{{.StoryTitle}}</h4>{{end}}
+        <p class="muted agent-run-meta">
+          {{if .RunKind}}{{runKindTitle .RunKind}}{{else}}Codex implement{{end}}
+          {{if .Branch}} · {{.Branch}}{{end}}
+          {{if .PRNumber}} · <a href="{{.PRURL}}" target="_blank" rel="noopener">PR #{{.PRNumber}}</a>{{end}}
+        </p>
         {{if .LogItems}}
         <ol class="agent-log">
           {{range .LogItems}}

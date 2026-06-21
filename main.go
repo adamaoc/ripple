@@ -201,8 +201,12 @@ type AgentRunSummary struct {
 	QueueRunID       int64
 	StoryID          string
 	StoryTitle       string
+	RunKind          string
 	Status           string
 	WorkingDirectory string
+	Branch           string
+	PRNumber         int
+	PRURL            string
 	Stdout           string
 	Stderr           string
 	FinalMessage     string
@@ -270,7 +274,9 @@ func main() {
 func NewApp(db *sql.DB) (*App, error) {
 	db.SetMaxOpenConns(1)
 	funcs := template.FuncMap{
-		"statusTitle": statusTitle,
+		"statusTitle":   statusTitle,
+		"runKindTitle":  runKindTitle,
+		"runKindSource": runKindSource,
 		"markdown": func(s string) template.HTML {
 			var buf bytes.Buffer
 			if err := goldmark.Convert([]byte(s), &buf); err != nil {
@@ -390,6 +396,10 @@ func (a *App) migrate(ctx context.Context) error {
 			project_id TEXT NOT NULL REFERENCES projects(id),
 			working_directory TEXT NOT NULL,
 			status TEXT NOT NULL,
+			run_kind TEXT NOT NULL DEFAULT 'codex_implement',
+			branch TEXT NOT NULL DEFAULT '',
+			pr_number INTEGER NOT NULL DEFAULT 0,
+			pr_url TEXT NOT NULL DEFAULT '',
 			prompt TEXT NOT NULL DEFAULT '',
 			stdout TEXT NOT NULL DEFAULT '',
 			stderr TEXT NOT NULL DEFAULT '',
@@ -397,6 +407,20 @@ func (a *App) migrate(ctx context.Context) error {
 			exit_error TEXT NOT NULL DEFAULT '',
 			started_at TEXT NOT NULL,
 			finished_at TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS story_pipelines (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			queue_run_id INTEGER NOT NULL REFERENCES queue_runs(id),
+			story_id TEXT NOT NULL REFERENCES stories(id),
+			phase TEXT NOT NULL DEFAULT '',
+			branch TEXT NOT NULL DEFAULT '',
+			default_branch TEXT NOT NULL DEFAULT '',
+			pr_number INTEGER NOT NULL DEFAULT 0,
+			pr_url TEXT NOT NULL DEFAULT '',
+			review_json TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL,
+			UNIQUE(queue_run_id, story_id)
 		)`,
 	}
 	for _, stmt := range stmts {
@@ -406,6 +430,17 @@ func (a *App) migrate(ctx context.Context) error {
 	}
 	if err := a.ensureColumn(ctx, "projects", "working_directory", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
+	}
+	agentColumns := map[string]string{
+		"run_kind":  "TEXT NOT NULL DEFAULT 'codex_implement'",
+		"branch":    "TEXT NOT NULL DEFAULT ''",
+		"pr_number": "INTEGER NOT NULL DEFAULT 0",
+		"pr_url":    "TEXT NOT NULL DEFAULT ''",
+	}
+	for column, definition := range agentColumns {
+		if err := a.ensureColumn(ctx, "agent_runs", column, definition); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1247,9 +1282,12 @@ func (a *App) updateQueueRun(ctx context.Context, id int64, status, message stri
 	return err
 }
 
-func (a *App) createAgentRun(ctx context.Context, queueRunID int64, project Project, story Story, prompt string) (int64, error) {
-	res, err := a.db.ExecContext(ctx, `INSERT INTO agent_runs (queue_run_id, story_id, project_id, working_directory, status, prompt, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		queueRunID, story.ID, project.ID, project.WorkingDirectory, "running", prompt, formatTime(time.Now().UTC()))
+func (a *App) createAgentRun(ctx context.Context, queueRunID int64, project Project, story Story, prompt, runKind, branch string, prNumber int, prURL string) (int64, error) {
+	if strings.TrimSpace(runKind) == "" {
+		runKind = RunKindCodexImplement
+	}
+	res, err := a.db.ExecContext(ctx, `INSERT INTO agent_runs (queue_run_id, story_id, project_id, working_directory, status, run_kind, branch, pr_number, pr_url, prompt, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		queueRunID, story.ID, project.ID, project.WorkingDirectory, "running", runKind, branch, prNumber, prURL, prompt, formatTime(time.Now().UTC()))
 	if err != nil {
 		return 0, err
 	}
@@ -1368,12 +1406,12 @@ func (a *App) agentActivityData(ctx context.Context, projectID, epicID string) (
 }
 
 func (a *App) listAgentStoryRuns(ctx context.Context, queueRunID int64) ([]AgentRunSummary, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT ar.id, ar.queue_run_id, ar.story_id, s.title, ar.status, ar.working_directory, ar.stdout, ar.stderr, ar.final_message, ar.exit_error, ar.started_at, ar.finished_at
+	rows, err := a.db.QueryContext(ctx, `SELECT ar.id, ar.queue_run_id, ar.story_id, s.title, ar.run_kind, ar.status, ar.working_directory, ar.branch, ar.pr_number, ar.pr_url, ar.stdout, ar.stderr, ar.final_message, ar.exit_error, ar.started_at, ar.finished_at
 		FROM agent_runs ar
 		LEFT JOIN stories s ON s.id = ar.story_id
 		WHERE ar.queue_run_id = ?
 		ORDER BY ar.id DESC
-		LIMIT 8`, queueRunID)
+		LIMIT 24`, queueRunID)
 	if err != nil {
 		return nil, err
 	}
@@ -1489,6 +1527,12 @@ func (a *App) startAgentQueueRun(ctx context.Context, filters storyFilters, base
 	if _, err := resolveCodexBinary(); err != nil {
 		return err
 	}
+	if _, err := resolveGrokBinary(); err != nil {
+		return err
+	}
+	if _, err := resolveGhBinary(); err != nil {
+		return err
+	}
 	queueRunID, err := a.createQueueRun(ctx, filters, len(queued))
 	if err != nil {
 		return err
@@ -1553,9 +1597,15 @@ func (a *App) runAgentQueue(ctx context.Context, queueRunID int64, filters story
 		}
 		a.publishAgentEvent("board")
 
-		finalMessage, err := a.runCodexForStory(ctx, queueRunID, baseURL, project, story, previousSummary)
+		pc := pipelineContext{
+			QueueRunID: queueRunID,
+			BaseURL:    baseURL,
+			Project:    project,
+			Story:      story,
+		}
+		finalMessage, err := a.runStoryPipeline(ctx, pc, previousSummary)
 		if err != nil {
-			_ = a.addEvent(ctx, story.ID, "agent_failed", "Codex run failed: "+err.Error())
+			_ = a.addEvent(ctx, story.ID, "agent_failed", "Story pipeline failed: "+err.Error())
 			status := "failed"
 			message := "Queue run failed"
 			if errors.Is(err, context.Canceled) {
@@ -1565,44 +1615,32 @@ func (a *App) runAgentQueue(ctx context.Context, queueRunID int64, filters story
 			a.finishAgentRun(context.Background(), queueRunID, status, message, completed, fmt.Errorf("%s failed: %w", story.ID, err))
 			return
 		}
-		refreshed, err := a.getStory(ctx, story.ID)
-		if err != nil {
-			a.finishAgentRun(context.Background(), queueRunID, "failed", "Queue run failed", completed, err)
+		if err := a.changeStoryStatus(context.Background(), story.ID, StatusDone, false, "Marked done after PR merged"); err != nil {
+			_ = a.addEvent(ctx, story.ID, "agent_needs_review", "PR merged, but the app could not mark the story done")
+			a.finishAgentRun(context.Background(), queueRunID, "needs_review", "Queue run needs review", completed, fmt.Errorf("%s was not marked done: %w", story.ID, err))
 			return
 		}
-		if refreshed.Status != StatusDone {
-			if err := a.changeStoryStatus(context.Background(), story.ID, StatusDone, false, "Marked done by agent runner after successful Codex run"); err != nil {
-				_ = a.addEvent(ctx, story.ID, "agent_needs_review", "Codex exited successfully, but the app could not mark the story done")
-				a.finishAgentRun(context.Background(), queueRunID, "needs_review", "Queue run needs review", completed, fmt.Errorf("%s was not marked done: %w", story.ID, err))
-				return
-			}
-			a.publishAgentEvent("board")
-		}
+		a.publishAgentEvent("board")
 		completed++
 		previousSummary = summarizeFinalMessage(story, finalMessage)
-		_ = a.addEvent(ctx, story.ID, "agent_completed", "Agent runner completed Codex run")
+		_ = a.addEvent(ctx, story.ID, "agent_completed", "Story pipeline completed and PR merged")
 		a.updateAgentProgress("", fmt.Sprintf("Completed %s", story.ID), completed, total)
 		_ = a.updateQueueRun(context.Background(), queueRunID, "running", fmt.Sprintf("Completed %s", story.ID), completed, nil)
 		a.publishAgentEvent("board")
 	}
 }
 
-func (a *App) runCodexForStory(ctx context.Context, queueRunID int64, baseURL string, project Project, story Story, previousSummary string) (string, error) {
-	docs, err := embeddedFiles.ReadFile("docs/bot-api.md")
-	if err != nil {
-		return "", err
-	}
+func (a *App) runCodexForStoryWithKind(ctx context.Context, queueRunID int64, baseURL string, project Project, story Story, prompt, runKind, branch string, prNumber int, prURL string) (string, error) {
 	runDir := filepath.Join(os.TempDir(), "thetaskmanager", "runs")
 	if err := os.MkdirAll(runDir, 0755); err != nil {
 		return "", err
 	}
-	finalPath := filepath.Join(runDir, story.ID+"-final.md")
-	prompt := buildCodexPrompt(baseURL, string(docs), project, story, previousSummary)
+	finalPath := filepath.Join(runDir, story.ID+"-"+runKind+"-final.md")
 	codexBin, err := resolveCodexBinary()
 	if err != nil {
 		return "", err
 	}
-	agentRunID, err := a.createAgentRun(context.Background(), queueRunID, project, story, prompt)
+	agentRunID, err := a.createAgentRun(context.Background(), queueRunID, project, story, prompt, runKind, branch, prNumber, prURL)
 	if err != nil {
 		return "", err
 	}
@@ -2277,7 +2315,7 @@ func scanAgentRun(row rowScanner) (AgentRunSummary, error) {
 	var r AgentRunSummary
 	var title, finished sql.NullString
 	var started string
-	if err := row.Scan(&r.ID, &r.QueueRunID, &r.StoryID, &title, &r.Status, &r.WorkingDirectory, &r.Stdout, &r.Stderr, &r.FinalMessage, &r.ExitError, &started, &finished); err != nil {
+	if err := row.Scan(&r.ID, &r.QueueRunID, &r.StoryID, &title, &r.RunKind, &r.Status, &r.WorkingDirectory, &r.Branch, &r.PRNumber, &r.PRURL, &r.Stdout, &r.Stderr, &r.FinalMessage, &r.ExitError, &started, &finished); err != nil {
 		return AgentRunSummary{}, err
 	}
 	if title.Valid {
@@ -2292,7 +2330,28 @@ func scanAgentRun(row rowScanner) (AgentRunSummary, error) {
 	return r, nil
 }
 
+func runKindTitle(kind string) string {
+	switch kind {
+	case RunKindGrokReview:
+		return "Grok review"
+	case RunKindCodexFix:
+		return "Codex fix"
+	default:
+		return "Codex implement"
+	}
+}
+
+func runKindSource(kind string) string {
+	if kind == RunKindGrokReview {
+		return "grok"
+	}
+	return "codex"
+}
+
 func agentLogItems(run AgentRunSummary) []AgentLogItem {
+	if run.RunKind == RunKindGrokReview {
+		return grokLogItems(run)
+	}
 	type codexItem struct {
 		Type             string `json:"type"`
 		Text             string `json:"text"`
@@ -2368,6 +2427,49 @@ func agentLogItems(run AgentRunSummary) []AgentLogItem {
 	}
 	if len(items) > 24 {
 		items = items[len(items)-24:]
+	}
+	return items
+}
+
+func grokLogItems(run AgentRunSummary) []AgentLogItem {
+	items := []AgentLogItem{}
+	add := func(kind, text string) {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return
+		}
+		items = append(items, AgentLogItem{Kind: kind, Text: truncate(text, 700)})
+	}
+	if text, err := extractGrokJSONText(run.Stdout); err == nil && strings.TrimSpace(text) != "" {
+		if review, err := parseGrokReview(text); err == nil {
+			if review.Approved {
+				add("success", "Grok approved: "+review.Summary)
+			} else {
+				add("message", "Grok requested changes: "+review.Summary)
+			}
+			for _, comment := range review.Comments {
+				body := strings.TrimSpace(comment.Body)
+				if body == "" {
+					continue
+				}
+				if strings.TrimSpace(comment.Path) != "" {
+					add("message", fmt.Sprintf("%s — %s", comment.Path, body))
+				} else {
+					add("message", body)
+				}
+			}
+		} else {
+			add("summary", text)
+		}
+	}
+	if strings.TrimSpace(run.ExitError) != "" {
+		add("error", run.ExitError)
+	}
+	if strings.TrimSpace(run.FinalMessage) != "" {
+		add("summary", run.FinalMessage)
+	}
+	if len(items) == 0 && strings.TrimSpace(run.Stdout) != "" {
+		add("summary", run.Stdout)
 	}
 	return items
 }
@@ -2562,40 +2664,10 @@ func requestBaseURL(r *http.Request) string {
 	return scheme + "://" + host
 }
 
-func buildCodexPrompt(baseURL, botDocs string, project Project, story Story, previousSummary string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "You are being run by TheTaskManager to complete one queued story in a local project.\n\n")
-	fmt.Fprintf(&b, "# Working Rules\n\n")
-	fmt.Fprintf(&b, "- Work only on the current story unless a tiny adjacent change is required.\n")
-	fmt.Fprintf(&b, "- Before editing, inspect the project structure and look for AGENTS.md, AGENTS.override.md, README files, styleguides, shared components, existing similar screens, routes, tests, and CSS patterns.\n")
-	fmt.Fprintf(&b, "- Follow the style and conventions of the existing app. Prefer existing helpers and patterns over new abstractions.\n")
-	fmt.Fprintf(&b, "- Run relevant checks or tests before marking the story done. If checks cannot run, say why in your final response.\n")
-	fmt.Fprintf(&b, "- Do not close stories. Closing is manual-only.\n")
-	fmt.Fprintf(&b, "- When the work is complete, mark this story done using TheTaskManager API.\n")
-	fmt.Fprintf(&b, "- If you cannot complete the work, leave the story in progress and explain the blocker in your final response.\n\n")
-	fmt.Fprintf(&b, "# TheTaskManager API\n\n")
-	fmt.Fprintf(&b, "Base URL: %s\n\n", baseURL)
-	fmt.Fprintf(&b, "To mark this story done, use:\n\n")
-	fmt.Fprintf(&b, "PATCH %s/api/stories/%s/status\nContent-Type: application/json\n\n{\"status\":\"done\"}\n\n", baseURL, story.ID)
-	fmt.Fprintf(&b, "Bot docs from %s/api/docs:\n\n%s\n\n", baseURL, botDocs)
-	if strings.TrimSpace(previousSummary) != "" {
-		fmt.Fprintf(&b, "# Previous Completed Story\n\n%s\n\n", previousSummary)
-	}
-	fmt.Fprintf(&b, "# Project\n\n")
-	fmt.Fprintf(&b, "Name: %s\nID: %s\nPrefix: %s\nWorking directory: %s\n\n", project.Name, project.ID, project.Prefix, project.WorkingDirectory)
-	fmt.Fprintf(&b, "# Current Story\n\n")
-	fmt.Fprintf(&b, "ID: %s\nTitle: %s\nStatus: %s\n", story.ID, story.Title, story.Status)
-	if story.EpicName != nil {
-		fmt.Fprintf(&b, "Epic: %s\n", *story.EpicName)
-	}
-	fmt.Fprintf(&b, "\nDescription:\n%s\n", story.Description)
-	return b.String()
-}
-
 func summarizeFinalMessage(story Story, finalMessage string) string {
 	finalMessage = strings.TrimSpace(finalMessage)
 	if finalMessage == "" {
-		finalMessage = "Codex completed the story and marked it done."
+		finalMessage = "Story pipeline completed and PR merged."
 	}
 	return fmt.Sprintf("%s - %s\n%s", story.ID, story.Title, truncate(finalMessage, 1200))
 }

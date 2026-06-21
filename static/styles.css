@@ -17,6 +17,12 @@
   --done: #287947;
   --closed: #71717a;
   --warning: #b7791f;
+  --agent-taskmanager: #0f766e;
+  --agent-taskmanager-soft: #e1f5f1;
+  --agent-codex: #2563eb;
+  --agent-codex-soft: #eaf1ff;
+  --agent-grok: #7c3aed;
+  --agent-grok-soft: #f2ebff;
   --shadow: 0 16px 40px rgba(16, 35, 31, .08);
   --shadow-soft: 0 8px 22px rgba(16, 35, 31, .06);
 }
@@ -438,6 +444,52 @@ select:focus, input:focus, textarea:focus {
   font-weight: 800;
 }
 
+.agent-summary-identity {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.agent-source-badge {
+  align-items: center;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 10px;
+  font-weight: 900;
+  gap: 5px;
+  letter-spacing: .035em;
+  line-height: 1;
+  padding: 4px 7px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.agent-source-badge > span {
+  align-items: center;
+  display: inline-flex;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 9px;
+  justify-content: center;
+  min-width: 14px;
+}
+
+.agent-source-badge.agent-source-taskmanager {
+  background: var(--agent-taskmanager-soft);
+  color: var(--agent-taskmanager) !important;
+}
+
+.agent-source-badge.agent-source-codex {
+  background: var(--agent-codex-soft);
+  color: var(--agent-codex) !important;
+}
+
+.agent-source-badge.agent-source-grok {
+  background: var(--agent-grok-soft);
+  color: var(--agent-grok) !important;
+}
+
 .agent-run-summary strong {
   color: var(--text);
 }
@@ -470,6 +522,14 @@ select:focus, input:focus, textarea:focus {
   padding: 10px;
 }
 
+.agent-work-codex {
+  background: linear-gradient(90deg, var(--agent-codex-soft), var(--panel) 34%);
+}
+
+.agent-work-grok {
+  background: linear-gradient(90deg, var(--agent-grok-soft), var(--panel) 34%);
+}
+
 .agent-thread-running {
   border-left-color: var(--queued);
 }
@@ -488,6 +548,14 @@ select:focus, input:focus, textarea:focus {
   align-items: center;
   display: flex;
   justify-content: space-between;
+}
+
+.agent-thread-identity {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
 }
 
 .agent-thread-topline strong {
@@ -546,6 +614,15 @@ select:focus, input:focus, textarea:focus {
 }
 
 .agent-run-summary pre,
+.agent-run-meta {
+  margin: 0.35rem 0 0.5rem;
+  font-size: 0.82rem;
+}
+
+.agent-run-meta a {
+  color: inherit;
+}
+
 .agent-thread-item pre {
   background: #10231f;
   border-radius: 8px;
