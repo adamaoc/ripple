@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="static/Ripple.png" alt="Ripple" width="112">
+<img src=".github/assets/ripple-banner.jpg" alt="Ripple — autonomous agent runs for real software tasks" width="100%">
 
 # Ripple
 
@@ -16,7 +16,7 @@ A local-first task manager and agent orchestrator. Humans shape the backlog. Age
 
 </div>
 
-![Ripple autonomous run workspace](docs/images/ripple-run.png)
+![Ripple autonomous run workspace](.github/assets/ripple-run.png)
 
 ## Stop babysitting the agent
 
