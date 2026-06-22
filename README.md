@@ -16,7 +16,9 @@ A local-first task manager and agent orchestrator. Humans shape the backlog. Age
 
 </div>
 
-![Ripple autonomous run workspace](.github/assets/ripple-run.png)
+![Ripple workspace dashboard](.github/assets/dashboard.jpg)
+
+<div align="center"><sub>One local workspace for project health, backlogs, and autonomous agent runs.</sub></div>
 
 ## Stop babysitting the agent
 
@@ -43,6 +45,27 @@ Every agent message, command, warning, review, and outcome stays visible in a st
 - **API-first task management** — Agents can discover the workflow and manage work through JSON and OpenAPI endpoints.
 - **Local-first by default** — One Go process, embedded UI, and a SQLite database you own.
 - **Focused interface** — Responsive light and dark themes with no frontend build step.
+
+## Product tour
+
+<table>
+<tr>
+<td width="50%"><strong>Shape the backlog</strong><br><sub>Filter stories, choose the work, and define the exact execution order.</sub></td>
+<td width="50%"><strong>Keep rich story context</strong><br><sub>Markdown descriptions, acceptance criteria, constraints, and history stay attached to the work.</sub></td>
+</tr>
+<tr>
+<td><img src=".github/assets/project-backlog.jpg" alt="Ripple project backlog and execution queue"></td>
+<td><img src=".github/assets/story-detail.jpg" alt="Ripple story detail with acceptance criteria"></td>
+</tr>
+<tr>
+<td><strong>Run the full delivery loop</strong><br><sub>Watch implementation and review passes, then inspect merged pull requests and run outcomes.</sub></td>
+<td><strong>Onboard without guesswork</strong><br><sub>Built-in guidance explains the workflow, required tools, and human-agent responsibilities.</sub></td>
+</tr>
+<tr>
+<td><img src=".github/assets/autonomous-run.jpg" alt="Completed Ripple autonomous agent run"></td>
+<td><img src=".github/assets/about.jpg" alt="Ripple About page and agent requirements"></td>
+</tr>
+</table>
 
 ## How it works
 
