@@ -4,7 +4,7 @@
 
 **Repo:** Ripple (TheTaskManager)  
 **Created:** 2026-07-14  
-**Status:** Phase 5 complete — ready for Phase 6
+**Status:** Phase 6 complete — ready for Phase 7
 
 
 
@@ -752,14 +752,22 @@ Add project workspace setup checks and clearer project onboarding.
 
 #### Acceptance criteria
 
-- [ ] No dead settings (every control changes runtime behavior).
-- [ ] Defaults preserve current behavior.
+- [x] No dead settings (every control changes runtime behavior).
+- [x] Defaults preserve current behavior.
 
 #### Suggested commit
 
 ```text
 Expand project delivery settings used by the pipeline.
 ```
+
+#### Completed
+
+- Columns: `default_branch_override`, `pr_base_branch`, `quality_gate_mode`, `delete_branch_on_merge`, `branch_name_template`
+- Pipeline: git preflight override, PR base, quality gate strict/warn, merge branch delete, branch name template
+- UI: Workspace | Delivery | Advanced in backlog + board project settings
+- API create accepts optional delivery fields; bot-api + OpenAPI documented
+- Skipped `skip_review` (too risky without explicit product need)
 
 ---
 
@@ -859,7 +867,7 @@ Phases 5 and 6 can partially overlap with 3–4 if staffing allows, but **2 depe
 | 3 Global agent settings | done | CLI provider registry + role binding + Settings UI |
 | 4 Runner + API reviewer | done | AgentRunner + OpenAI-compatible API reviewer |
 | 5 Workspace setup | done | Checklist, verify, clone, git-root, UI project create |
-| 6 More project settings | not started | |
+| 6 More project settings | done | Delivery settings wired into pipeline |
 | 7 Docs + delete plan | not started | |
 
 Update this table as phases complete.

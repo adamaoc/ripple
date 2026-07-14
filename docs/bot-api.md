@@ -39,6 +39,16 @@ Projects may also have a `workingDirectory`. Use the Git repository root, or the
 
 Projects may set `autonomyMode` to `autonomous` (default) or `supervised`. Autonomous runs implement, review, and merge without waiting. Supervised runs implement, open a PR, post an agent review, then stop with the story in `in_review` until a human acts: address review comments, merge the PR (with quality gate), or sync if the PR was already merged on GitHub. Invalid values are stored as `autonomous`. Agents cannot set status to `in_review`, `queued`, or `closed`.
 
+Optional delivery fields (all have safe defaults that preserve current behavior):
+
+| Field | Default | Effect |
+|-------|---------|--------|
+| `defaultBranchOverride` | empty (auto-detect) | Checkout branch before runs when auto-detect is wrong |
+| `prBaseBranch` | empty (use default branch) | `gh pr create --base` |
+| `qualityGateMode` | `strict` | `strict` fails the run/merge on check errors; `warn` logs and continues |
+| `deleteBranchOnMerge` | `true` | Delete the feature branch on GitHub and locally after merge |
+| `branchNameTemplate` | `ripple/{id}-{slug}` | Feature branch name; placeholders `{id}`, `{slug}`, `{prefix}` (must include `{id}`) |
+
 ## Create a Project
 
 Use this when you know the project before creating stories.
@@ -52,11 +62,16 @@ Content-Type: application/json
   "name": "TXGarage",
   "prefix": "TXG",
   "workingDirectory": "/Users/adamm/Documents/WEBPROJECTS/Sites and Apps/TXGarage",
-  "autonomyMode": "autonomous"
+  "autonomyMode": "autonomous",
+  "defaultBranchOverride": "",
+  "prBaseBranch": "",
+  "qualityGateMode": "strict",
+  "deleteBranchOnMerge": true,
+  "branchNameTemplate": "ripple/{id}-{slug}"
 }
 ```
 
-`autonomyMode` is optional. Omit it (or pass an empty/invalid value) to default to `autonomous`.
+`autonomyMode` is optional. Omit it (or pass an empty/invalid value) to default to `autonomous`. Delivery fields above are optional on create.
 
 ## Create an Epic
 

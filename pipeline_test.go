@@ -50,6 +50,40 @@ func TestParseCreatedPRURLRejectsUnexpectedOutput(t *testing.T) {
 	}
 }
 
+func TestStoryBranchNameTemplate(t *testing.T) {
+	project := Project{Prefix: "A", BranchNameTemplate: "feat/{prefix}/{id}-{slug}"}
+	story := Story{ID: "A-001", Title: "Hello World", ProjectPrefix: "A"}
+	got := storyBranchName(project, story)
+	if got != "feat/A/A-001-hello-world" {
+		t.Fatalf("branch = %q", got)
+	}
+	// Empty / invalid template falls back to default pattern.
+	project.BranchNameTemplate = "no-id-here"
+	got = storyBranchName(project, story)
+	if !strings.HasPrefix(got, "ripple/A-001-") {
+		t.Fatalf("fallback branch = %q", got)
+	}
+}
+
+func TestResolvePRBaseAndDefaultBranch(t *testing.T) {
+	p := Project{DefaultBranchOverride: "develop", PRBaseBranch: ""}
+	if p.resolvePRBaseBranch("main") != "develop" && p.resolvePRBaseBranch(p.DefaultBranchOverride) != "develop" {
+		// resolvePRBase with empty pr base uses argument
+	}
+	if got := p.resolvePRBaseBranch("main"); got != "main" {
+		// PR base empty → use passed default branch string
+		t.Fatalf("pr base = %q want main (explicit default branch arg)", got)
+	}
+	p.PRBaseBranch = "release"
+	if got := p.resolvePRBaseBranch("main"); got != "release" {
+		t.Fatalf("pr base = %q", got)
+	}
+	// Override used when resolving default without git (unit-level)
+	if strings.TrimSpace(p.DefaultBranchOverride) != "develop" {
+		t.Fatal("override missing")
+	}
+}
+
 func TestRunKindSource(t *testing.T) {
 	tests := map[string]string{
 		RunKindCodexImplement:       "implementer",

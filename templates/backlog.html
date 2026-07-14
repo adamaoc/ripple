@@ -17,17 +17,39 @@
           <div class="project-settings-panel">
             <form method="post" action="/projects/{{.Project.ID}}/settings">
               <input type="hidden" name="redirect" value="/projects/{{.Project.ID}}/backlog?status={{.Backlog.SelectedStatus}}">
-              <label>Working directory<input name="workingDirectory" value="{{.Project.WorkingDirectory}}" placeholder="/path/to/repository" autocomplete="off"></label>
-              <div class="project-path-actions">
-                <button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}{{if .Project.WorkingDirectory}}&path={{urlquery .Project.WorkingDirectory}}{{end}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Choose folder</button>
+              <input type="hidden" name="deliverySettings" value="1">
+              <div class="settings-block">
+                <h3>Workspace</h3>
+                <label>Working directory<input name="workingDirectory" value="{{.Project.WorkingDirectory}}" placeholder="/path/to/repository" autocomplete="off"></label>
+                <div class="project-path-actions">
+                  <button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}{{if .Project.WorkingDirectory}}&path={{urlquery .Project.WorkingDirectory}}{{end}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Choose folder</button>
+                </div>
               </div>
-              <label>Autonomy
-                <select name="autonomyMode">
-                  <option value="autonomous" {{if eq .Project.AutonomyMode "autonomous"}}selected{{end}}>Autonomous — implement, review, and merge without waiting</option>
-                  <option value="supervised" {{if eq .Project.AutonomyMode "supervised"}}selected{{end}}>Supervised — open PR and review, then wait for you</option>
-                </select>
-              </label>
-              <p class="muted settings-help">{{if eq .Project.AutonomyMode "supervised"}}Supervised: Ripple implements and reviews, then waits for you to act on feedback and merge.{{else}}Autonomous: Ripple implements, reviews, and merges on its own.{{end}}</p>
+              <div class="settings-block">
+                <h3>Delivery</h3>
+                <label>Autonomy
+                  <select name="autonomyMode">
+                    <option value="autonomous" {{if eq .Project.AutonomyMode "autonomous"}}selected{{end}}>Autonomous — implement, review, and merge without waiting</option>
+                    <option value="supervised" {{if eq .Project.AutonomyMode "supervised"}}selected{{end}}>Supervised — open PR and review, then wait for you</option>
+                  </select>
+                </label>
+                <p class="muted settings-help">{{if eq .Project.AutonomyMode "supervised"}}Supervised: Ripple implements and reviews, then waits for you to act on feedback and merge.{{else}}Autonomous: Ripple implements, reviews, and merges on its own.{{end}}</p>
+                <label>Default branch override<input name="defaultBranchOverride" value="{{.Project.DefaultBranchOverride}}" placeholder="Leave blank to auto-detect (main/master)" autocomplete="off"></label>
+                <p class="muted settings-help">Used for checkout before runs when auto-detect is wrong.</p>
+                <label>PR base branch<input name="prBaseBranch" value="{{.Project.PRBaseBranch}}" placeholder="Defaults to the resolved default branch" autocomplete="off"></label>
+                <label>Quality gate
+                  <select name="qualityGateMode">
+                    <option value="strict" {{if ne .Project.QualityGateMode "warn"}}selected{{end}}>Strict — fail and stop on check errors</option>
+                    <option value="warn" {{if eq .Project.QualityGateMode "warn"}}selected{{end}}>Warn — log failures and continue to merge</option>
+                  </select>
+                </label>
+                <label class="checkbox-label"><input type="checkbox" name="deleteBranchOnMerge" value="1" {{if .Project.DeleteBranchOnMerge}}checked{{end}}> Delete feature branch after merge</label>
+              </div>
+              <div class="settings-block">
+                <h3>Advanced</h3>
+                <label>Branch name template<input name="branchNameTemplate" value="{{.Project.BranchNameTemplate}}" placeholder="ripple/{id}-{slug}" autocomplete="off"></label>
+                <p class="muted settings-help">Placeholders: <code>{id}</code>, <code>{slug}</code>, <code>{prefix}</code>. Must include <code>{id}</code>.</p>
+              </div>
               <div class="project-path-actions"><button type="submit">Save settings</button></div>
             </form>
 

@@ -76,12 +76,25 @@ type pipelineContext struct {
 	PRURL         string
 }
 
-func storyBranchName(story Story) string {
+func storyBranchName(project Project, story Story) string {
 	slug := slugifyBranchSegment(story.Title)
 	if slug == "" {
 		slug = "work"
 	}
-	return fmt.Sprintf("ripple/%s-%s", story.ID, slug)
+	prefix := strings.TrimSpace(project.Prefix)
+	if prefix == "" {
+		prefix = strings.TrimSpace(story.ProjectPrefix)
+	}
+	tmpl := normalizeBranchNameTemplate(project.BranchNameTemplate)
+	branch := tmpl
+	branch = strings.ReplaceAll(branch, "{id}", story.ID)
+	branch = strings.ReplaceAll(branch, "{slug}", slug)
+	branch = strings.ReplaceAll(branch, "{prefix}", prefix)
+	branch = strings.Trim(branch, "/")
+	if branch == "" || strings.Contains(branch, "{") {
+		return fmt.Sprintf("ripple/%s-%s", story.ID, slug)
+	}
+	return branch
 }
 
 var branchSlugPattern = regexp.MustCompile(`[^a-z0-9]+`)
@@ -119,7 +132,7 @@ func runCommand(ctx context.Context, dir string, name string, args ...string) (s
 	return stdout.String(), stderr.String(), err
 }
 
-func gitPreflight(ctx context.Context, dir string) (string, error) {
+func gitPreflight(ctx context.Context, dir string, defaultBranchOverride string) (string, error) {
 	if !isGitWorkTree(dir) {
 		return "", fmt.Errorf("working directory is not a git repository: %s", dir)
 	}
@@ -133,9 +146,14 @@ func gitPreflight(ctx context.Context, dir string) (string, error) {
 	if strings.TrimSpace(status) != "" {
 		return "", fmt.Errorf("repository has uncommitted changes; commit, stash, or discard local changes before running the queue:\n%s", truncate(status, 1200))
 	}
-	defaultBranch, err := detectDefaultBranch(ctx, dir)
-	if err != nil {
-		return "", err
+	var defaultBranch string
+	if override := strings.TrimSpace(defaultBranchOverride); override != "" {
+		defaultBranch = override
+	} else {
+		defaultBranch, err = detectDefaultBranch(ctx, dir)
+		if err != nil {
+			return "", err
+		}
 	}
 	current, _, err := runCommand(ctx, dir, "git", "branch", "--show-current")
 	if err != nil {
@@ -327,8 +345,12 @@ func ghPRComment(ctx context.Context, ghBin, dir string, prNumber int, body stri
 	return nil
 }
 
-func ghPRMerge(ctx context.Context, ghBin, dir string, prNumber int) error {
-	_, stderr, err := runCommand(ctx, dir, ghBin, "pr", "merge", fmt.Sprintf("%d", prNumber), "--merge", "--delete-branch")
+func ghPRMerge(ctx context.Context, ghBin, dir string, prNumber int, deleteRemoteBranch bool) error {
+	args := []string{"pr", "merge", fmt.Sprintf("%d", prNumber), "--merge"}
+	if deleteRemoteBranch {
+		args = append(args, "--delete-branch")
+	}
+	_, stderr, err := runCommand(ctx, dir, ghBin, args...)
 	if err != nil {
 		detail := strings.TrimSpace(stderr)
 		if detail == "" {
@@ -872,7 +894,7 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
 		return pipelineResult{}, err
 	}
-	defaultBranch, err := gitPreflight(ctx, dir)
+	defaultBranch, err := gitPreflight(ctx, dir, pc.Project.DefaultBranchOverride)
 	if err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
@@ -881,7 +903,7 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	pc.DefaultBranch = defaultBranch
 	pipeline.DefaultBranch = defaultBranch
 
-	branch := storyBranchName(pc.Story)
+	branch := storyBranchName(pc.Project, pc.Story)
 	pc.Branch = branch
 	pipeline.Branch = branch
 	pipeline.Phase = PipelinePhaseBranching
@@ -937,7 +959,8 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	_ = a.upsertStoryPipeline(ctx, pipeline)
 	prTitle := fmt.Sprintf("%s: %s", pc.Story.ID, pc.Story.Title)
 	prBody := fmt.Sprintf("Automated PR for story **%s**.\n\n## Description\n\n%s", pc.Story.ID, pc.Story.Description)
-	prNumber, prURL, err := ghCreatePR(ctx, ghBin, dir, defaultBranch, branch, prTitle, prBody)
+	prBase := pc.Project.resolvePRBaseBranch(defaultBranch)
+	prNumber, prURL, err := ghCreatePR(ctx, ghBin, dir, prBase, branch, prTitle, prBody)
 	if err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
@@ -1007,20 +1030,26 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	pipeline.Phase = PipelinePhaseQualityGate
 	_ = a.upsertStoryPipeline(ctx, pipeline)
 	if err := runQualityGate(ctx, dir); err != nil {
-		pipeline.Error = err.Error()
-		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return pipelineResult{}, err
+		if pc.Project.qualityGateIsWarn() {
+			_ = a.addEvent(ctx, pc.Story.ID, eventQualityGateWarned, "Quality gate failed (warn mode); continuing to merge: "+err.Error())
+		} else {
+			pipeline.Error = err.Error()
+			_ = a.upsertStoryPipeline(ctx, pipeline)
+			return pipelineResult{}, err
+		}
 	}
 
 	pipeline.Phase = PipelinePhaseMerge
 	_ = a.upsertStoryPipeline(ctx, pipeline)
-	if err := ghPRMerge(ctx, ghBin, dir, prNumber); err != nil {
+	if err := ghPRMerge(ctx, ghBin, dir, prNumber, pc.Project.DeleteBranchOnMerge); err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
 		return pipelineResult{}, err
 	}
 	_ = gitCheckoutBranch(ctx, dir, defaultBranch)
-	_ = gitDeleteLocalBranch(ctx, dir, branch, defaultBranch)
+	if pc.Project.DeleteBranchOnMerge {
+		_ = gitDeleteLocalBranch(ctx, dir, branch, defaultBranch)
+	}
 
 	pipeline.Phase = PipelinePhaseCompleted
 	pipeline.Error = ""
@@ -1215,7 +1244,9 @@ func (a *App) completeAddressFeedback(ctx context.Context, story Story, pipeline
 // Test hooks for human merge (production defaults; overridden in tests).
 var (
 	humanMergeQualityGate = runQualityGate
-	humanMergePR          = ghPRMerge
+	humanMergePR          = func(ctx context.Context, ghBin, dir string, prNumber int, deleteRemoteBranch bool) error {
+		return ghPRMerge(ctx, ghBin, dir, prNumber, deleteRemoteBranch)
+	}
 )
 
 const eventMergedByHuman = "merged_by_human"
@@ -1265,7 +1296,7 @@ func (a *App) executeHumanMerge(ctx context.Context, story Story, project Projec
 
 	defaultBranch := strings.TrimSpace(pipeline.DefaultBranch)
 	if defaultBranch == "" {
-		defaultBranch, err = detectDefaultBranch(ctx, dir)
+		defaultBranch, err = project.resolveDefaultBranch(ctx, dir)
 		if err != nil {
 			return err
 		}
@@ -1287,12 +1318,16 @@ func (a *App) executeHumanMerge(ctx context.Context, story Story, project Projec
 		return err
 	}
 	if err := humanMergeQualityGate(ctx, dir); err != nil {
-		pipeline.Error = err.Error()
-		pipeline.Phase = PipelinePhaseAwaitingHuman
-		_ = a.upsertStoryPipeline(ctx, pipeline)
-		_ = a.addEvent(ctx, story.ID, eventQualityGateFailed, "Quality gate failed before merge: "+err.Error())
-		a.publishAgentEvent("board")
-		return badRequest("Quality gate failed; story stays in review. " + truncate(err.Error(), 400))
+		if project.qualityGateIsWarn() {
+			_ = a.addEvent(ctx, story.ID, eventQualityGateWarned, "Quality gate failed (warn mode); continuing to merge: "+err.Error())
+		} else {
+			pipeline.Error = err.Error()
+			pipeline.Phase = PipelinePhaseAwaitingHuman
+			_ = a.upsertStoryPipeline(ctx, pipeline)
+			_ = a.addEvent(ctx, story.ID, eventQualityGateFailed, "Quality gate failed before merge: "+err.Error())
+			a.publishAgentEvent("board")
+			return badRequest("Quality gate failed; story stays in review. " + truncate(err.Error(), 400))
+		}
 	}
 
 	a.updateAgentProgress(story.ID, fmt.Sprintf("Merging PR for %s", story.ID), 0, 1)
@@ -1301,7 +1336,7 @@ func (a *App) executeHumanMerge(ctx context.Context, story Story, project Projec
 	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
 		return err
 	}
-	if err := humanMergePR(ctx, ghBin, dir, pipeline.PRNumber); err != nil {
+	if err := humanMergePR(ctx, ghBin, dir, pipeline.PRNumber, project.DeleteBranchOnMerge); err != nil {
 		pipeline.Error = err.Error()
 		pipeline.Phase = PipelinePhaseAwaitingHuman
 		_ = a.upsertStoryPipeline(ctx, pipeline)
@@ -1312,7 +1347,9 @@ func (a *App) executeHumanMerge(ctx context.Context, story Story, project Projec
 
 	if strings.TrimSpace(pipeline.Branch) != "" {
 		_ = gitCheckoutBranch(ctx, dir, defaultBranch)
-		_ = gitDeleteLocalBranch(ctx, dir, pipeline.Branch, defaultBranch)
+		if project.DeleteBranchOnMerge {
+			_ = gitDeleteLocalBranch(ctx, dir, pipeline.Branch, defaultBranch)
+		}
 	} else {
 		_ = gitCheckoutBranch(ctx, dir, defaultBranch)
 	}
@@ -1374,14 +1411,14 @@ func (a *App) syncExternalPRMerge(ctx context.Context, storyID string) error {
 	// Best-effort local cleanup after external merge (same as supervised merge).
 	defaultBranch := strings.TrimSpace(pipeline.DefaultBranch)
 	if defaultBranch == "" {
-		if db, dbErr := detectDefaultBranch(ctx, project.WorkingDirectory); dbErr == nil {
+		if db, dbErr := project.resolveDefaultBranch(ctx, project.WorkingDirectory); dbErr == nil {
 			defaultBranch = db
 			pipeline.DefaultBranch = defaultBranch
 		}
 	}
 	if defaultBranch != "" {
 		_ = gitCheckoutBranch(ctx, project.WorkingDirectory, defaultBranch)
-		if strings.TrimSpace(pipeline.Branch) != "" {
+		if project.DeleteBranchOnMerge && strings.TrimSpace(pipeline.Branch) != "" {
 			_ = gitDeleteLocalBranch(ctx, project.WorkingDirectory, pipeline.Branch, defaultBranch)
 		}
 	}

@@ -84,15 +84,27 @@ type App struct {
 }
 
 type Project struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	Prefix           string    `json:"prefix"`
-	WorkingDirectory string    `json:"workingDirectory"`
-	AutonomyMode     string    `json:"autonomyMode"`
-	NextStoryNumber  int       `json:"nextStoryNumber"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	ID                    string    `json:"id"`
+	Name                  string    `json:"name"`
+	Prefix                string    `json:"prefix"`
+	WorkingDirectory      string    `json:"workingDirectory"`
+	AutonomyMode          string    `json:"autonomyMode"`
+	DefaultBranchOverride string    `json:"defaultBranchOverride"`
+	PRBaseBranch          string    `json:"prBaseBranch"`
+	QualityGateMode       string    `json:"qualityGateMode"`
+	DeleteBranchOnMerge   bool      `json:"deleteBranchOnMerge"`
+	BranchNameTemplate    string    `json:"branchNameTemplate"`
+	NextStoryNumber       int       `json:"nextStoryNumber"`
+	CreatedAt             time.Time `json:"createdAt"`
+	UpdatedAt             time.Time `json:"updatedAt"`
 }
+
+const (
+	QualityGateStrict         = "strict"
+	QualityGateWarn           = "warn"
+	DefaultBranchNameTemplate = "ripple/{id}-{slug}"
+	eventQualityGateWarned    = "quality_gate_warned"
+)
 
 type Epic struct {
 	ID          string    `json:"id"`
@@ -903,6 +915,21 @@ func (a *App) migrate(ctx context.Context) error {
 	if err := a.ensureColumn(ctx, "projects", "autonomy_mode", "TEXT NOT NULL DEFAULT 'autonomous'"); err != nil {
 		return err
 	}
+	if err := a.ensureColumn(ctx, "projects", "default_branch_override", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := a.ensureColumn(ctx, "projects", "pr_base_branch", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := a.ensureColumn(ctx, "projects", "quality_gate_mode", "TEXT NOT NULL DEFAULT 'strict'"); err != nil {
+		return err
+	}
+	if err := a.ensureColumn(ctx, "projects", "delete_branch_on_merge", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := a.ensureColumn(ctx, "projects", "branch_name_template", "TEXT NOT NULL DEFAULT 'ripple/{id}-{slug}'"); err != nil {
+		return err
+	}
 	if err := a.ensureColumn(ctx, "stories", "queue_position", "INTEGER"); err != nil {
 		return err
 	}
@@ -1229,6 +1256,24 @@ func (a *App) handleUIProjectSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Delivery settings: only update when the form includes the section marker.
+	if _, ok := r.Form["deliverySettings"]; ok {
+		deleteBranch := r.FormValue("deleteBranchOnMerge") == "1" || strings.EqualFold(r.FormValue("deleteBranchOnMerge"), "on") || strings.EqualFold(r.FormValue("deleteBranchOnMerge"), "true")
+		// Checkbox: if form has deliverySettings but no deleteBranchOnMerge field, treat as false.
+		if _, present := r.Form["deleteBranchOnMerge"]; !present {
+			deleteBranch = false
+		}
+		if err := a.updateProjectDeliverySettings(r.Context(), id, projectDeliverySettings{
+			DefaultBranchOverride: r.FormValue("defaultBranchOverride"),
+			PRBaseBranch:          r.FormValue("prBaseBranch"),
+			QualityGateMode:       r.FormValue("qualityGateMode"),
+			DeleteBranchOnMerge:   deleteBranch,
+			BranchNameTemplate:    r.FormValue("branchNameTemplate"),
+		}); err != nil {
+			httpError(w, err)
+			return
+		}
+	}
 	a.finishUIAction(w, r)
 }
 
@@ -1446,11 +1491,16 @@ func (a *App) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, projects)
 	case http.MethodPost:
 		var req struct {
-			ID               string `json:"id"`
-			Name             string `json:"name"`
-			Prefix           string `json:"prefix"`
-			WorkingDirectory string `json:"workingDirectory"`
-			AutonomyMode     string `json:"autonomyMode"`
+			ID                    string `json:"id"`
+			Name                  string `json:"name"`
+			Prefix                string `json:"prefix"`
+			WorkingDirectory      string `json:"workingDirectory"`
+			AutonomyMode          string `json:"autonomyMode"`
+			DefaultBranchOverride string `json:"defaultBranchOverride"`
+			PRBaseBranch          string `json:"prBaseBranch"`
+			QualityGateMode       string `json:"qualityGateMode"`
+			DeleteBranchOnMerge   *bool  `json:"deleteBranchOnMerge"`
+			BranchNameTemplate    string `json:"branchNameTemplate"`
 		}
 		if err := decodeJSON(r, &req); err != nil {
 			httpError(w, err)
@@ -1460,6 +1510,33 @@ func (a *App) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			httpError(w, err)
 			return
+		}
+		// Optional delivery fields on create.
+		hasDelivery := strings.TrimSpace(req.DefaultBranchOverride) != "" ||
+			strings.TrimSpace(req.PRBaseBranch) != "" ||
+			strings.TrimSpace(req.QualityGateMode) != "" ||
+			strings.TrimSpace(req.BranchNameTemplate) != "" ||
+			req.DeleteBranchOnMerge != nil
+		if hasDelivery {
+			del := true
+			if req.DeleteBranchOnMerge != nil {
+				del = *req.DeleteBranchOnMerge
+			}
+			if err := a.updateProjectDeliverySettings(r.Context(), project.ID, projectDeliverySettings{
+				DefaultBranchOverride: req.DefaultBranchOverride,
+				PRBaseBranch:          req.PRBaseBranch,
+				QualityGateMode:       req.QualityGateMode,
+				DeleteBranchOnMerge:   del,
+				BranchNameTemplate:    req.BranchNameTemplate,
+			}); err != nil {
+				httpError(w, err)
+				return
+			}
+			project, err = a.getProject(r.Context(), project.ID)
+			if err != nil {
+				httpError(w, err)
+				return
+			}
 		}
 		writeJSON(w, http.StatusCreated, project)
 	}
@@ -1770,6 +1847,89 @@ func (a *App) updateProjectAutonomyMode(ctx context.Context, id, autonomyMode st
 	_, err := a.db.ExecContext(ctx, `UPDATE projects SET autonomy_mode = ?, updated_at = ? WHERE id = ?`,
 		autonomyMode, formatTime(time.Now().UTC()), id)
 	return err
+}
+
+type projectDeliverySettings struct {
+	DefaultBranchOverride string
+	PRBaseBranch          string
+	QualityGateMode       string
+	DeleteBranchOnMerge   bool
+	BranchNameTemplate    string
+}
+
+func (a *App) updateProjectDeliverySettings(ctx context.Context, id string, settings projectDeliverySettings) error {
+	if _, err := a.getProject(ctx, id); err != nil {
+		return err
+	}
+	settings.DefaultBranchOverride = sanitizeBranchName(settings.DefaultBranchOverride)
+	settings.PRBaseBranch = sanitizeBranchName(settings.PRBaseBranch)
+	settings.QualityGateMode = normalizeQualityGateMode(settings.QualityGateMode)
+	settings.BranchNameTemplate = normalizeBranchNameTemplate(settings.BranchNameTemplate)
+	deleteFlag := 0
+	if settings.DeleteBranchOnMerge {
+		deleteFlag = 1
+	}
+	_, err := a.db.ExecContext(ctx, `UPDATE projects SET
+		default_branch_override = ?,
+		pr_base_branch = ?,
+		quality_gate_mode = ?,
+		delete_branch_on_merge = ?,
+		branch_name_template = ?,
+		updated_at = ?
+		WHERE id = ?`,
+		settings.DefaultBranchOverride,
+		settings.PRBaseBranch,
+		settings.QualityGateMode,
+		deleteFlag,
+		settings.BranchNameTemplate,
+		formatTime(time.Now().UTC()),
+		id,
+	)
+	return err
+}
+
+func normalizeQualityGateMode(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case QualityGateWarn:
+		return QualityGateWarn
+	default:
+		return QualityGateStrict
+	}
+}
+
+func normalizeBranchNameTemplate(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return DefaultBranchNameTemplate
+	}
+	// Keep templates conservative: placeholders + path-safe chars.
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '{' || r == '}' || r == '/' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return DefaultBranchNameTemplate
+	}
+	if !strings.Contains(s, "{id}") {
+		return DefaultBranchNameTemplate
+	}
+	return s
+}
+
+func sanitizeBranchName(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// Disallow spaces and shell metacharacters; allow typical git branch chars.
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '/' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return ""
+	}
+	return s
 }
 
 func (a *App) folderPickerData(project Project, requestedPath string) (FolderPickerData, error) {
@@ -3039,8 +3199,12 @@ func countStatuses(stories []Story) StatusCounts {
 	return counts
 }
 
+const projectSelectColumns = `id, name, prefix, working_directory, autonomy_mode,
+	default_branch_override, pr_base_branch, quality_gate_mode, delete_branch_on_merge, branch_name_template,
+	next_story_number, created_at, updated_at`
+
 func (a *App) listProjects(ctx context.Context) ([]Project, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT id, name, prefix, working_directory, autonomy_mode, next_story_number, created_at, updated_at FROM projects ORDER BY name`)
+	rows, err := a.db.QueryContext(ctx, `SELECT `+projectSelectColumns+` FROM projects ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -3057,7 +3221,7 @@ func (a *App) listProjects(ctx context.Context) ([]Project, error) {
 }
 
 func (a *App) getProject(ctx context.Context, id string) (Project, error) {
-	row := a.db.QueryRowContext(ctx, `SELECT id, name, prefix, working_directory, autonomy_mode, next_story_number, created_at, updated_at FROM projects WHERE id = ?`, id)
+	row := a.db.QueryRowContext(ctx, `SELECT `+projectSelectColumns+` FROM projects WHERE id = ?`, id)
 	return scanProject(row)
 }
 
@@ -3177,10 +3341,18 @@ type rowScanner interface {
 func scanProject(row rowScanner) (Project, error) {
 	var p Project
 	var created, updated string
-	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.WorkingDirectory, &p.AutonomyMode, &p.NextStoryNumber, &created, &updated); err != nil {
+	var deleteBranch int
+	if err := row.Scan(
+		&p.ID, &p.Name, &p.Prefix, &p.WorkingDirectory, &p.AutonomyMode,
+		&p.DefaultBranchOverride, &p.PRBaseBranch, &p.QualityGateMode, &deleteBranch, &p.BranchNameTemplate,
+		&p.NextStoryNumber, &created, &updated,
+	); err != nil {
 		return Project{}, err
 	}
 	p.AutonomyMode = normalizeAutonomyMode(p.AutonomyMode)
+	p.QualityGateMode = normalizeQualityGateMode(p.QualityGateMode)
+	p.BranchNameTemplate = normalizeBranchNameTemplate(p.BranchNameTemplate)
+	p.DeleteBranchOnMerge = deleteBranch != 0
 	p.CreatedAt = parseTime(created)
 	p.UpdatedAt = parseTime(updated)
 	return p, nil
@@ -3519,6 +3691,8 @@ func eventTitle(eventType string) string {
 		return "Synced external merge"
 	case eventQualityGateFailed:
 		return "Quality gate failed"
+	case eventQualityGateWarned:
+		return "Quality gate warned"
 	case "merge_failed":
 		return "Merge failed"
 	case "agent_completed":
@@ -3590,6 +3764,26 @@ func normalizeAutonomyMode(s string) string {
 	default:
 		return AutonomyAutonomous
 	}
+}
+
+// resolveDefaultBranch returns project override or auto-detected default branch.
+func (p Project) resolveDefaultBranch(ctx context.Context, dir string) (string, error) {
+	if override := strings.TrimSpace(p.DefaultBranchOverride); override != "" {
+		return override, nil
+	}
+	return detectDefaultBranch(ctx, dir)
+}
+
+// resolvePRBaseBranch is the PR --base branch (override or resolved default).
+func (p Project) resolvePRBaseBranch(defaultBranch string) string {
+	if base := strings.TrimSpace(p.PRBaseBranch); base != "" {
+		return base
+	}
+	return defaultBranch
+}
+
+func (p Project) qualityGateIsWarn() bool {
+	return normalizeQualityGateMode(p.QualityGateMode) == QualityGateWarn
 }
 
 func normalizeWorkingDirectory(path string) (string, error) {

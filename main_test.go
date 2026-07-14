@@ -903,7 +903,7 @@ func TestHumanMergeSuccessMarksDone(t *testing.T) {
 		humanMergePR = origMerge
 	})
 	humanMergeQualityGate = func(ctx context.Context, dir string) error { return nil }
-	humanMergePR = func(ctx context.Context, ghBin, dir string, prNumber int) error {
+	humanMergePR = func(ctx context.Context, ghBin, dir string, prNumber int, deleteRemoteBranch bool) error {
 		if prNumber != 11 {
 			t.Fatalf("prNumber = %d", prNumber)
 		}
@@ -980,7 +980,7 @@ func TestHumanMergeQualityGateFailureStaysInReview(t *testing.T) {
 		return errors.New("go test failed: assertion error")
 	}
 	merged := false
-	humanMergePR = func(ctx context.Context, ghBin, dir string, prNumber int) error {
+	humanMergePR = func(ctx context.Context, ghBin, dir string, prNumber int, deleteRemoteBranch bool) error {
 		merged = true
 		return nil
 	}

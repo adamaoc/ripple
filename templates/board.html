@@ -364,16 +364,36 @@
   <section class="dashboard-section project-path-section">
     <h3>Project settings</h3>
     <form data-board-refresh-form hx-post="/projects/{{.Project.ID}}/settings" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
-      <label>Working directory
-        <input name="workingDirectory" value="{{.Project.WorkingDirectory}}" placeholder="/Users/adamm/path/to/repo" autocomplete="off">
-      </label>
-      <button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}{{if .Project.WorkingDirectory}}&path={{urlquery .Project.WorkingDirectory}}{{end}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Choose folder</button>
-      <label>Autonomy
-        <select name="autonomyMode">
-          <option value="autonomous" {{if eq .Project.AutonomyMode "autonomous"}}selected{{end}}>Autonomous — implement, review, and merge without waiting</option>
-          <option value="supervised" {{if eq .Project.AutonomyMode "supervised"}}selected{{end}}>Supervised — open PR and review, then wait for you</option>
-        </select>
-      </label>
+      <input type="hidden" name="deliverySettings" value="1">
+      <div class="settings-block">
+        <h4>Workspace</h4>
+        <label>Working directory
+          <input name="workingDirectory" value="{{.Project.WorkingDirectory}}" placeholder="/Users/adamm/path/to/repo" autocomplete="off">
+        </label>
+        <button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}{{if .Project.WorkingDirectory}}&path={{urlquery .Project.WorkingDirectory}}{{end}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Choose folder</button>
+      </div>
+      <div class="settings-block">
+        <h4>Delivery</h4>
+        <label>Autonomy
+          <select name="autonomyMode">
+            <option value="autonomous" {{if eq .Project.AutonomyMode "autonomous"}}selected{{end}}>Autonomous — implement, review, and merge without waiting</option>
+            <option value="supervised" {{if eq .Project.AutonomyMode "supervised"}}selected{{end}}>Supervised — open PR and review, then wait for you</option>
+          </select>
+        </label>
+        <label>Default branch override<input name="defaultBranchOverride" value="{{.Project.DefaultBranchOverride}}" placeholder="Auto-detect" autocomplete="off"></label>
+        <label>PR base branch<input name="prBaseBranch" value="{{.Project.PRBaseBranch}}" placeholder="Same as default branch" autocomplete="off"></label>
+        <label>Quality gate
+          <select name="qualityGateMode">
+            <option value="strict" {{if ne .Project.QualityGateMode "warn"}}selected{{end}}>Strict</option>
+            <option value="warn" {{if eq .Project.QualityGateMode "warn"}}selected{{end}}>Warn</option>
+          </select>
+        </label>
+        <label class="checkbox-label"><input type="checkbox" name="deleteBranchOnMerge" value="1" {{if .Project.DeleteBranchOnMerge}}checked{{end}}> Delete branch after merge</label>
+      </div>
+      <div class="settings-block">
+        <h4>Advanced</h4>
+        <label>Branch name template<input name="branchNameTemplate" value="{{.Project.BranchNameTemplate}}" placeholder="ripple/{id}-{slug}" autocomplete="off"></label>
+      </div>
       <button type="submit">Save settings</button>
     </form>
     <p class="muted">Use the Git repo root or the folder where you normally start Codex for this project.</p>
