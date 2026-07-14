@@ -27,7 +27,7 @@
       {{if and (not .Run.Run.ID) .Run.Agent.Running}}<p class="inline-notice">Another project run is active. Only one run can execute at a time.</p>{{end}}
       <ol class="run-queue">
         {{if .Run.Run.ID}}
-          {{range .Run.Items}}<li class="item-{{.Status}}"><span class="run-item-index">{{.Position}}</span><div><strong class="mono">{{.Story.ID}}</strong><span>{{.Story.Title}}</span></div><span class="run-item-status">{{.Status}}</span></li>{{else}}<li class="empty-state">No stored run items.</li>{{end}}
+          {{range .Run.Items}}<li class="item-{{.Status}}"><span class="run-item-index">{{.Position}}</span><div><strong class="mono">{{.Story.ID}}</strong><span>{{.Story.Title}}</span></div><span class="run-item-status">{{queueItemStatusTitle .Status}}</span></li>{{else}}<li class="empty-state">No stored run items.</li>{{end}}
         {{else}}
           {{range .Run.LiveQueue}}<li class="item-pending"><span class="run-item-index">{{with .QueuePosition}}{{.}}{{end}}</span><div><strong class="mono">{{.ID}}</strong><span>{{.Title}}</span></div><span class="run-item-status">pending</span></li>{{else}}<li class="empty-state">Queue stories from the project backlog first.</li>{{end}}
         {{end}}
@@ -45,7 +45,7 @@
           <details class="transcript-entry source-ripple" data-run-section="overview" open><summary><div class="entry-rail"><span>R</span></div><div class="entry-summary"><header><strong>Ripple</strong><time>{{.Run.Run.StartedAt.Format "Jan 02, 2006 · 15:04"}}</time></header><p>Run #{{.Run.Run.ID}} started with {{.Run.Run.Total}} queued stories.</p></div></summary><div class="entry-content">{{if .Run.Run.Error}}<pre class="error-output">{{.Run.Run.Error}}</pre>{{else}}<p class="muted">The queue snapshot was created and execution began in the order shown at left.</p>{{end}}</div></details>
           {{range .Run.Activity.StoryRuns}}
           <details class="transcript-entry source-{{runKindSource .RunKind}}" data-run-section="agent-{{.ID}}" open>
-            <summary><div class="entry-rail"><span>{{if eq (runKindSource .RunKind) "grok"}}G{{else}}C{{end}}</span></div><div class="entry-summary"><header><strong>{{if eq (runKindSource .RunKind) "grok"}}Grok review{{else}}Codex{{end}} · {{.StoryID}}</strong><time>{{.StartedAt.Format "15:04:05"}}</time></header><h3>{{.StoryTitle}}</h3><p class="entry-meta">{{runKindTitle .RunKind}}{{if .Branch}} · <span class="mono">{{.Branch}}</span>{{end}}{{if .PRNumber}} · <a href="{{.PRURL}}" target="_blank" rel="noopener" onclick="event.stopPropagation()">PR #{{.PRNumber}}</a>{{end}}</p></div></summary>
+            <summary><div class="entry-rail"><span>{{if eq (runKindSource .RunKind) "reviewer"}}R{{else}}I{{end}}</span></div><div class="entry-summary"><header><strong>{{if eq (runKindSource .RunKind) "reviewer"}}Reviewer{{else}}Implementer{{end}} · {{.StoryID}}</strong><time>{{.StartedAt.Format "15:04:05"}}</time></header><h3>{{.StoryTitle}}</h3><p class="entry-meta">{{runKindTitle .RunKind}}{{if .Branch}} · <span class="mono">{{.Branch}}</span>{{end}}{{if .PRNumber}} · <a href="{{.PRURL}}" target="_blank" rel="noopener" onclick="event.stopPropagation()">PR #{{.PRNumber}}</a>{{end}}</p></div></summary>
             <div class="entry-content">
               {{range .LogItems}}<div class="log-line log-{{.Kind}}"><span>{{.Kind}}</span><pre>{{.Text}}</pre></div>{{end}}
               {{if .FinalMessage}}<div class="final-message">{{.FinalMessage}}</div>{{end}}
@@ -55,18 +55,31 @@
           {{else}}<div class="transcript-empty"><span class="mono">&gt;_</span><h3>Waiting for the first agent event</h3><p>The transcript will build here as the run advances.</p></div>{{end}}
           {{if .Run.Run.FinishedAt}}
           <details class="run-completion-summary" data-run-section="completion" open>
-            <summary><div><span class="eyebrow">Run complete</span><h3>{{if eq .Run.Run.Status "completed"}}Work finished successfully{{else if eq .Run.Run.Status "stopped"}}Run was stopped{{else}}Run finished with an issue{{end}}</h3></div><span class="status-label status-{{.Run.Run.Status}}"><i></i>{{.Run.Run.Status}}</span></summary>
+            <summary><div><span class="eyebrow">Run complete</span><h3>{{if gt .Run.Summary.AwaitingHumanCount 0}}Queue finished — {{.Run.Summary.AwaitingHumanCount}} waiting on you{{else if eq .Run.Run.Status "completed"}}Work finished successfully{{else if eq .Run.Run.Status "stopped"}}Run was stopped{{else}}Run finished with an issue{{end}}</h3></div><span class="status-label status-{{.Run.Run.Status}}"><i></i>{{.Run.Run.Status}}</span></summary>
             <div class="completion-content">
             <div class="completion-stats">
-              <div><span>Stories completed</span><strong>{{.Run.Run.Completed}} / {{.Run.Run.Total}}</strong></div>
+              <div><span>Stories processed</span><strong>{{.Run.Run.Completed}} / {{.Run.Run.Total}}</strong></div>
               <div><span>Agent passes</span><strong>{{.Run.Summary.AgentSteps}}</strong></div>
-              <div><span>Pull requests</span><strong>{{len .Run.Summary.PullRequests}}</strong></div>
+              <div><span>Merged</span><strong>{{.Run.Summary.MergedCount}}</strong></div>
+              <div><span>Awaiting you</span><strong>{{.Run.Summary.AwaitingHumanCount}}</strong></div>
               <div><span>Elapsed time</span><strong>{{.Run.Summary.Elapsed}}</strong></div>
             </div>
             {{if .Run.Summary.PullRequests}}
-            <div class="completion-prs"><h4>{{if eq .Run.Run.Status "completed"}}Pull requests created and merged{{else}}Pull requests created{{end}}</h4>
-              {{range .Run.Summary.PullRequests}}<a href="{{.URL}}" target="_blank" rel="noopener"><span><strong>{{.StoryID}} · PR #{{.Number}}</strong><small>{{.StoryTitle}}{{if .Branch}} · <span class="mono">{{.Branch}}</span>{{end}}</small></span><span aria-hidden="true">↗</span></a>{{end}}
+            {{if .Run.Summary.MergedPRs}}
+            <div class="completion-prs"><h4>Merged pull requests</h4>
+              {{range .Run.Summary.MergedPRs}}<a href="{{.URL}}" target="_blank" rel="noopener"><span><strong>{{.StoryID}} · PR #{{.Number}}</strong><small>{{.StoryTitle}}{{if .Branch}} · <span class="mono">{{.Branch}}</span>{{end}}</small></span><span aria-hidden="true">↗</span></a>{{end}}
             </div>
+            {{end}}
+            {{if .Run.Summary.AwaitingHumanPRs}}
+            <div class="completion-prs completion-prs-awaiting"><h4>Pull requests awaiting your review</h4>
+              {{range .Run.Summary.AwaitingHumanPRs}}<a href="{{.URL}}" target="_blank" rel="noopener"><span><strong>{{.StoryID}} · PR #{{.Number}}</strong><small>{{.StoryTitle}}{{if .Branch}} · <span class="mono">{{.Branch}}</span>{{end}} · waiting on you</small></span><span aria-hidden="true">↗</span></a>{{end}}
+            </div>
+            {{end}}
+            {{if .Run.Summary.OpenPRs}}
+            <div class="completion-prs"><h4>Other pull requests</h4>
+              {{range .Run.Summary.OpenPRs}}<a href="{{.URL}}" target="_blank" rel="noopener"><span><strong>{{.StoryID}} · PR #{{.Number}}</strong><small>{{.StoryTitle}}{{if .Branch}} · <span class="mono">{{.Branch}}</span>{{end}}</small></span><span aria-hidden="true">↗</span></a>{{end}}
+            </div>
+            {{end}}
             {{else}}<p class="completion-empty">No pull request was recorded for this run.</p>{{end}}
             </div>
           </details>

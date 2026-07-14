@@ -12,12 +12,51 @@
           <select name="epicId" aria-label="Filter by epic" onchange="this.form.submit()"><option value="">Epics</option>{{range .Backlog.Epics}}<option value="{{.ID}}" {{if eq $.Backlog.SelectedEpic .ID}}selected{{end}}>{{.Name}}</option>{{end}}</select>
           <input type="hidden" name="status" value="{{.Backlog.SelectedStatus}}">
         </form>
-        <details class="project-settings"><summary><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 14.5 21 16l-2 3-2.4-1a8 8 0 0 1-2.1 1.2L14 22h-4l-.5-2.8A8 8 0 0 1 7.4 18L5 19l-2-3 2-1.5a8 8 0 0 1 0-2.5L3 10l2-3 2.4 1a8 8 0 0 1 2.1-1.2L10 4h4l.5 2.8A8 8 0 0 1 16.6 8L19 7l2 3-2 2a8 8 0 0 1 0 2.5Z"/></svg>Project settings</summary><form method="post" action="/projects/{{.Project.ID}}/working-directory"><input type="hidden" name="redirect" value="/projects/{{.Project.ID}}/backlog?status={{.Backlog.SelectedStatus}}"><label>Working directory<input name="workingDirectory" value="{{.Project.WorkingDirectory}}" placeholder="/path/to/repository"></label><div class="project-path-actions"><button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}{{if .Project.WorkingDirectory}}&path={{urlquery .Project.WorkingDirectory}}{{end}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Choose folder</button><button type="submit">Save path</button></div></form></details>
+        <details class="project-settings">
+          <summary><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 14.5 21 16l-2 3-2.4-1a8 8 0 0 1-2.1 1.2L14 22h-4l-.5-2.8A8 8 0 0 1 7.4 18L5 19l-2-3 2-1.5a8 8 0 0 1 0-2.5L3 10l2-3 2.4 1a8 8 0 0 1 2.1-1.2L10 4h4l.5 2.8A8 8 0 0 1 16.6 8L19 7l2 3-2 2a8 8 0 0 1 0 2.5Z"/></svg>Project settings</summary>
+          <div class="project-settings-panel">
+            <form method="post" action="/projects/{{.Project.ID}}/settings">
+              <input type="hidden" name="redirect" value="/projects/{{.Project.ID}}/backlog?status={{.Backlog.SelectedStatus}}">
+              <label>Working directory<input name="workingDirectory" value="{{.Project.WorkingDirectory}}" placeholder="/path/to/repository" autocomplete="off"></label>
+              <div class="project-path-actions">
+                <button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}{{if .Project.WorkingDirectory}}&path={{urlquery .Project.WorkingDirectory}}{{end}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Choose folder</button>
+              </div>
+              <label>Autonomy
+                <select name="autonomyMode">
+                  <option value="autonomous" {{if eq .Project.AutonomyMode "autonomous"}}selected{{end}}>Autonomous — implement, review, and merge without waiting</option>
+                  <option value="supervised" {{if eq .Project.AutonomyMode "supervised"}}selected{{end}}>Supervised — open PR and review, then wait for you</option>
+                </select>
+              </label>
+              <p class="muted settings-help">{{if eq .Project.AutonomyMode "supervised"}}Supervised: Ripple implements and reviews, then waits for you to act on feedback and merge.{{else}}Autonomous: Ripple implements, reviews, and merges on its own.{{end}}</p>
+              <div class="project-path-actions"><button type="submit">Save settings</button></div>
+            </form>
+
+            <div class="setup-section">
+              <div class="setup-section-heading">
+                <h3>Workspace setup</h3>
+                <button type="button" class="secondary-button" hx-get="/projects/{{.Project.ID}}/setup-status" hx-target="#project-setup-status" hx-swap="innerHTML">Verify setup</button>
+              </div>
+              <div id="project-setup-status" class="setup-status-host">
+                <p class="muted settings-help">Check path, git, GitHub remote, and agent tools before running the queue.</p>
+              </div>
+            </div>
+
+            <form class="clone-form" method="post" action="/projects/{{.Project.ID}}/clone">
+              <input type="hidden" name="redirect" value="/projects/{{.Project.ID}}/backlog?status={{.Backlog.SelectedStatus}}">
+              <h3>Clone from GitHub</h3>
+              <p class="muted settings-help">Clones into a parent folder (default <code>~/RippleWorkspaces</code>) and sets the working directory.</p>
+              <label>Repository URL<input name="repoUrl" placeholder="https://github.com/org/repo" autocomplete="off"></label>
+              <label>Parent directory<input name="parentDirectory" placeholder="~/RippleWorkspaces" autocomplete="off"></label>
+              <div class="project-path-actions"><button type="submit" class="secondary-button">Clone and use</button></div>
+            </form>
+          </div>
+        </details>
       </section>
 
       <nav class="status-tabs" aria-label="Story status">
         <a class="{{if eq .Backlog.SelectedStatus "backlog"}}active{{end}}" href="?status=backlog{{if .Backlog.SelectedEpic}}&epicId={{.Backlog.SelectedEpic}}{{end}}">Backlog <span>{{.Backlog.Counts.Backlog}}</span></a>
         <a class="{{if eq .Backlog.SelectedStatus "in_progress"}}active{{end}}" href="?status=in_progress{{if .Backlog.SelectedEpic}}&epicId={{.Backlog.SelectedEpic}}{{end}}">In progress <span>{{.Backlog.Counts.InProgress}}</span></a>
+        <a class="{{if eq .Backlog.SelectedStatus "in_review"}}active{{end}}" href="?status=in_review{{if .Backlog.SelectedEpic}}&epicId={{.Backlog.SelectedEpic}}{{end}}">In review <span>{{.Backlog.Counts.InReview}}</span></a>
         <a class="{{if eq .Backlog.SelectedStatus "done"}}active{{end}}" href="?status=done{{if .Backlog.SelectedEpic}}&epicId={{.Backlog.SelectedEpic}}{{end}}">Done <span>{{.Backlog.Counts.Done}}</span></a>
         <a class="{{if eq .Backlog.SelectedStatus "closed"}}active{{end}}" href="?status=closed{{if .Backlog.SelectedEpic}}&epicId={{.Backlog.SelectedEpic}}{{end}}">Closed <span>{{.Backlog.Counts.Closed}}</span></a>
       </nav>
@@ -30,7 +69,7 @@
             {{range .Backlog.Stories}}<tr class="story-row" hx-get="/stories/{{.ID}}/panel" hx-target="#story-modal-content" hx-swap="innerHTML">
               {{if eq $.Backlog.SelectedStatus "backlog"}}<td class="check-cell" onclick="event.stopPropagation()"><input type="checkbox" name="storyId" value="{{.ID}}" aria-label="Select {{.ID}}"></td>{{end}}
               <td class="mono story-id">{{.ID}}</td><td><strong>{{.Title}}</strong><span class="row-subtitle">{{truncateText .Description 110}}</span></td><td>{{with .EpicName}}{{.}}{{else}}—{{end}}</td><td class="mono muted">{{.UpdatedAt.Format "Jan 02"}}</td>
-              <td onclick="event.stopPropagation()"><form method="post" action="/stories/{{.ID}}/status"><input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/backlog?status={{$.Backlog.SelectedStatus}}"><select name="status" onchange="this.form.submit()"><option value="backlog" {{if eq .Status "backlog"}}selected{{end}}>Backlog</option><option value="queued" {{if eq .Status "queued"}}selected{{end}}>Queued</option><option value="in_progress" {{if eq .Status "in_progress"}}selected{{end}}>In progress</option><option value="done" {{if eq .Status "done"}}selected{{end}}>Done</option></select></form></td>
+              <td onclick="event.stopPropagation()"><form method="post" action="/stories/{{.ID}}/status"><input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/backlog?status={{$.Backlog.SelectedStatus}}"><select name="status" onchange="this.form.submit()"><option value="backlog" {{if eq .Status "backlog"}}selected{{end}}>Backlog</option><option value="queued" {{if eq .Status "queued"}}selected{{end}}>Queued</option><option value="in_progress" {{if eq .Status "in_progress"}}selected{{end}}>In progress</option><option value="in_review" {{if eq .Status "in_review"}}selected{{end}}>In review</option><option value="done" {{if eq .Status "done"}}selected{{end}}>Done</option></select></form></td>
             </tr>{{else}}<tr><td colspan="6" class="empty-state">No stories in this view.</td></tr>{{end}}
           </tbody></table></div>
         </form>

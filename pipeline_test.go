@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -51,14 +52,83 @@ func TestParseCreatedPRURLRejectsUnexpectedOutput(t *testing.T) {
 
 func TestRunKindSource(t *testing.T) {
 	tests := map[string]string{
-		RunKindCodexImplement: "codex",
-		RunKindCodexFix:       "codex",
-		RunKindGrokReview:     "grok",
-		"":                    "codex",
+		RunKindCodexImplement:       "implementer",
+		RunKindCodexFix:             "implementer",
+		RunKindCodexAddressFeedback: "implementer",
+		RunKindGrokReview:           "reviewer",
+		"":                          "implementer",
 	}
 	for kind, want := range tests {
 		if got := runKindSource(kind); got != want {
 			t.Errorf("runKindSource(%q) = %q, want %q", kind, got, want)
+		}
+	}
+}
+
+func TestPRFeedbackActionableAndFingerprint(t *testing.T) {
+	empty := PRFeedback{}
+	if empty.HasActionableComments() {
+		t.Fatal("empty feedback should not be actionable")
+	}
+	onlyWhitespace := PRFeedback{Items: []PRFeedbackItem{{Kind: "review", Body: "  "}}}
+	if onlyWhitespace.HasActionableComments() {
+		t.Fatal("whitespace-only body should not be actionable")
+	}
+	withComment := PRFeedback{Items: []PRFeedbackItem{{Kind: "review_comment", Author: "ada", Body: "Please fix the nil check", Path: "main.go", Line: 10}}}
+	if !withComment.HasActionableComments() {
+		t.Fatal("comment body should be actionable")
+	}
+	agentOnly := PRFeedback{AgentReviewJSON: `{"approved":false,"summary":"needs tests","comments":[{"path":"a.go","line":1,"body":"add test"}]}`}
+	if !agentOnly.HasActionableComments() {
+		t.Fatal("agent review with content should be actionable")
+	}
+	fp1 := feedbackFingerprint(withComment)
+	fp2 := feedbackFingerprint(withComment)
+	if fp1 == "" || fp1 != fp2 {
+		t.Fatalf("fingerprint unstable: %q vs %q", fp1, fp2)
+	}
+	changed := withComment
+	changed.Items[0].Body = "Please fix the nil check and add a test"
+	if feedbackFingerprint(changed) == fp1 {
+		t.Fatal("fingerprint should change when comments change")
+	}
+}
+
+func TestEvaluateAddressFeedback(t *testing.T) {
+	fb := PRFeedback{Items: []PRFeedbackItem{{Kind: "issue_comment", Author: "bob", Body: "Rename this helper"}}}
+	if err := evaluateAddressFeedback(fb, nil); err != nil {
+		t.Fatalf("first pass should accept feedback: %v", err)
+	}
+	fp := feedbackFingerprint(fb)
+	events := []StoryEvent{{Type: eventFeedbackAddressed, Message: "done " + feedbackFingerprintPrefix + fp}}
+	err := evaluateAddressFeedback(fb, events)
+	if err == nil || !strings.Contains(err.Error(), "No new review comments") {
+		t.Fatalf("expected no-new-comments error, got %v", err)
+	}
+	err = evaluateAddressFeedback(PRFeedback{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "No review comments found") {
+		t.Fatalf("expected no-comments error, got %v", err)
+	}
+}
+
+func TestBuildCodexAddressFeedbackPromptPrioritizesHuman(t *testing.T) {
+	fb := PRFeedback{
+		Items: []PRFeedbackItem{
+			{Kind: "issue_comment", Author: "human", Body: "Please rename Foo to Bar"},
+		},
+		AgentReviewJSON: `{"approved":false,"summary":"agent note","comments":[]}`,
+	}
+	prompt := buildCodexAddressFeedbackPrompt("http://localhost:8080", "docs", Project{Name: "Atlas", WorkingDirectory: "/tmp"}, Story{ID: "A-001", Title: "T", Description: "D"}, "ripple/A-001-t", 7, "https://example.com/pull/7", fb)
+	for _, marker := range []string{
+		"Prioritize **human** review comments",
+		"Please rename Foo to Bar",
+		"secondary context",
+		"agent note",
+		"Do not merge the PR",
+		"PR #7",
+	} {
+		if !strings.Contains(prompt, marker) {
+			t.Fatalf("prompt missing %q", marker)
 		}
 	}
 }

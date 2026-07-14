@@ -93,6 +93,20 @@
       </div>
     </details>
 
+    <details class="status-section column-in_review" open>
+      <summary>
+        <span><span class="status-dot"></span>In Review</span>
+        <span class="column-count">{{len (index .StoriesByCol "in_review")}}</span>
+      </summary>
+      <div class="cards card-grid">
+        {{range index .StoriesByCol "in_review"}}
+        {{template "story_card.html" .}}
+        {{else}}
+        <div class="empty">No stories in review</div>
+        {{end}}
+      </div>
+    </details>
+
     <details class="status-section column-done" open>
       <summary>
         <span><span class="status-dot"></span>Done</span>
@@ -280,6 +294,7 @@
       <option value="backlog" {{if eq .Status "backlog"}}selected{{end}}>Backlog</option>
       <option value="queued" {{if eq .Status "queued"}}selected{{end}}>Queued</option>
       <option value="in_progress" {{if eq .Status "in_progress"}}selected{{end}}>In Progress</option>
+      <option value="in_review" {{if eq .Status "in_review"}}selected{{end}}>In Review</option>
       <option value="done" {{if eq .Status "done"}}selected{{end}}>Done</option>
     </select>
   </form>
@@ -303,6 +318,7 @@
       <option value="backlog" {{if eq .Status "backlog"}}selected{{end}}>Backlog</option>
       <option value="queued" {{if eq .Status "queued"}}selected{{end}}>Queued</option>
       <option value="in_progress" {{if eq .Status "in_progress"}}selected{{end}}>In Progress</option>
+      <option value="in_review" {{if eq .Status "in_review"}}selected{{end}}>In Review</option>
       <option value="done" {{if eq .Status "done"}}selected{{end}}>Done</option>
     </select>
   </form>
@@ -346,13 +362,36 @@
     <p>{{.Project.Prefix}} project stats</p>
   </div>
   <section class="dashboard-section project-path-section">
-    <h3>Agent Working Directory</h3>
-    <form data-board-refresh-form hx-post="/projects/{{.Project.ID}}/working-directory" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
-      <input name="workingDirectory" value="{{.Project.WorkingDirectory}}" placeholder="/Users/adamm/path/to/repo" autocomplete="off">
+    <h3>Project settings</h3>
+    <form data-board-refresh-form hx-post="/projects/{{.Project.ID}}/settings" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
+      <label>Working directory
+        <input name="workingDirectory" value="{{.Project.WorkingDirectory}}" placeholder="/Users/adamm/path/to/repo" autocomplete="off">
+      </label>
       <button type="button" class="secondary-button" hx-get="/folder-picker?projectId={{.Project.ID}}{{if .Project.WorkingDirectory}}&path={{urlquery .Project.WorkingDirectory}}{{end}}" hx-target="#folder-picker-content" hx-swap="innerHTML">Choose folder</button>
-      <button type="submit">Save path</button>
+      <label>Autonomy
+        <select name="autonomyMode">
+          <option value="autonomous" {{if eq .Project.AutonomyMode "autonomous"}}selected{{end}}>Autonomous — implement, review, and merge without waiting</option>
+          <option value="supervised" {{if eq .Project.AutonomyMode "supervised"}}selected{{end}}>Supervised — open PR and review, then wait for you</option>
+        </select>
+      </label>
+      <button type="submit">Save settings</button>
     </form>
     <p class="muted">Use the Git repo root or the folder where you normally start Codex for this project.</p>
+    <div class="setup-section board-setup-section">
+      <div class="setup-section-heading">
+        <h4>Workspace setup</h4>
+        <button type="button" class="secondary-button" hx-get="/projects/{{.Project.ID}}/setup-status" hx-target="#board-setup-status" hx-swap="innerHTML">Verify setup</button>
+      </div>
+      <div id="board-setup-status" class="setup-status-host">
+        <p class="muted settings-help">Check path, git, GitHub, and agent tools.</p>
+      </div>
+    </div>
+    <form class="clone-form" method="post" action="/projects/{{.Project.ID}}/clone" data-board-refresh-form hx-post="/projects/{{.Project.ID}}/clone" hx-target="#board-shell" hx-swap="outerHTML" hx-include="#filter-form">
+      <h4>Clone from GitHub</h4>
+      <label>Repository URL<input name="repoUrl" placeholder="https://github.com/org/repo" autocomplete="off"></label>
+      <label>Parent directory<input name="parentDirectory" placeholder="~/RippleWorkspaces" autocomplete="off"></label>
+      <button type="submit" class="secondary-button">Clone and use</button>
+    </form>
   </section>
   <div class="metric-grid">
     <div class="metric">
@@ -447,12 +486,43 @@
   <strong>{{.InProgress}}</strong>
 </div>
 <div class="metric">
+  <span>In Review</span>
+  <strong>{{.InReview}}</strong>
+</div>
+<div class="metric">
   <span>Done</span>
   <strong>{{.Done}}</strong>
 </div>
 <div class="metric">
   <span>Closed</span>
   <strong>{{.Closed}}</strong>
+</div>
+{{end}}
+
+{{define "setup_status.html"}}
+<div class="setup-status {{if .Ready}}setup-ready{{else}}setup-blocked{{end}}">
+  <p class="setup-summary"><strong>{{if .Ready}}Ready{{else}}Needs attention{{end}}</strong> — {{.Summary}}</p>
+  {{if .GitRootDiffers}}
+  <div class="setup-git-root-hint">
+    <p class="settings-help">This path is inside a git repo. Prefer the repository root: <code class="mono">{{.SuggestedGitRoot}}</code></p>
+    <form method="post" action="/projects/{{.Project.ID}}/use-git-root">
+      <input type="hidden" name="redirect" value="/projects/{{.Project.ID}}/backlog">
+      <button type="submit" class="secondary-button">Use repo root instead</button>
+    </form>
+  </div>
+  {{end}}
+  <ul class="setup-check-list">
+    {{range .Checks}}
+    <li class="setup-check setup-{{.Status}}">
+      <span class="setup-mark" aria-hidden="true">{{if eq .Status "pass"}}✓{{else if eq .Status "warn"}}!{{else}}×{{end}}</span>
+      <div>
+        <strong>{{.Label}}</strong>
+        <span class="setup-detail">{{.Detail}}</span>
+        {{if .Hint}}<span class="setup-hint">{{.Hint}}</span>{{end}}
+      </div>
+    </li>
+    {{end}}
+  </ul>
 </div>
 {{end}}
 
@@ -467,6 +537,16 @@
   </div>
   {{if .Error}}
   <p class="folder-picker-error">{{.Error}}</p>
+  {{end}}
+  {{if .GitRootDiffers}}
+  <div class="folder-git-root-hint">
+    <p class="settings-help">This folder is inside a git repo. Repo root: <code class="mono">{{.SuggestedGitRoot}}</code></p>
+    <form method="post" action="/projects/{{.Project.ID}}/working-directory">
+      <input type="hidden" name="workingDirectory" value="{{.SuggestedGitRoot}}">
+      <input type="hidden" name="redirect" value="/projects/{{.Project.ID}}/backlog">
+      <button type="submit" class="secondary-button">Use repo root instead</button>
+    </form>
+  </div>
   {{end}}
   <div class="folder-picker-actions">
     {{if .Parent}}

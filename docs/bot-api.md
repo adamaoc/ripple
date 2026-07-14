@@ -22,9 +22,9 @@ GET /api/openapi.yaml
 - Every story belongs to a project.
 - An epic is optional.
 - Story descriptions are Markdown.
-- Intended flow is `backlog -> queued -> in_progress -> done`.
+- Intended flow is `backlog -> queued -> in_progress -> in_review -> done` (autonomous runs may skip visible `in_review` and go straight to `done` after merge).
 - Bots may only set story status to `backlog`, `in_progress`, or `done`.
-- `queued` is currently human-facing and reserved for future agent-pickup work.
+- `queued` and `in_review` are human/orchestrator-only. Bots must not set them.
 - Bots must not close stories. Closing is a manual human review action in the UI.
 - If a user says work is complete, move the story to `done`, not `closed`.
 - Closed stories are hidden from the default board and default story list.
@@ -36,6 +36,8 @@ Stories use project-prefixed IDs such as `TXG-001` or `RV-001`.
 Projects have a required prefix. When creating a project through a story request, provide `projectPrefix` if the user has a clear preference. If no prefix is known, choose a short uppercase prefix from the project name.
 
 Projects may also have a `workingDirectory`. Use the Git repository root, or the folder where Codex should start work for that project. If a project already exists without a working directory, providing one in a later project or story request fills it in. Existing working directories are not overwritten silently.
+
+Projects may set `autonomyMode` to `autonomous` (default) or `supervised`. Autonomous runs implement, review, and merge without waiting. Supervised runs implement, open a PR, post an agent review, then stop with the story in `in_review` until a human acts: address review comments, merge the PR (with quality gate), or sync if the PR was already merged on GitHub. Invalid values are stored as `autonomous`. Agents cannot set status to `in_review`, `queued`, or `closed`.
 
 ## Create a Project
 
@@ -49,9 +51,12 @@ Content-Type: application/json
   "id": "txgarage",
   "name": "TXGarage",
   "prefix": "TXG",
-  "workingDirectory": "/Users/adamm/Documents/WEBPROJECTS/Sites and Apps/TXGarage"
+  "workingDirectory": "/Users/adamm/Documents/WEBPROJECTS/Sites and Apps/TXGarage",
+  "autonomyMode": "autonomous"
 }
 ```
+
+`autonomyMode` is optional. Omit it (or pass an empty/invalid value) to default to `autonomous`.
 
 ## Create an Epic
 
@@ -159,7 +164,7 @@ Allowed bot statuses:
 - `in_progress`
 - `done`
 
-Do not attempt to set `closed`; the API rejects it.
+Do not attempt to set `queued`, `in_review`, or `closed`; the API rejects them.
 
 ## Event History
 

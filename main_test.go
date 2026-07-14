@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -32,7 +34,7 @@ func testApp(t *testing.T) *App {
 
 func seedProjectStories(t *testing.T, app *App, projectID string, count int) []Story {
 	t.Helper()
-	if _, err := app.createProject(context.Background(), projectID, strings.ToUpper(projectID), strings.ToUpper(projectID[:1]), "/tmp"); err != nil {
+	if _, err := app.createProject(context.Background(), projectID, strings.ToUpper(projectID), strings.ToUpper(projectID[:1]), "/tmp", ""); err != nil {
 		t.Fatal(err)
 	}
 	stories := make([]Story, 0, count)
@@ -82,13 +84,33 @@ func TestSettingsOwnsThemeControlsAndUtilityNavigation(t *testing.T) {
 		t.Fatalf("settings status = %d", res.Code)
 	}
 	body := res.Body.String()
-	for _, marker := range []string{`data-theme-choice="light"`, `data-theme-choice="dark"`, `data-theme-choice="system"`, `href="/about"`, `href="/api/docs"`} {
+	for _, marker := range []string{
+		`data-theme-choice="light"`,
+		`data-theme-choice="dark"`,
+		`data-theme-choice="system"`,
+		`href="/about"`,
+		`href="/api/docs"`,
+		`id="agents"`,
+		`href="#agents"`,
+		`id="api-providers"`,
+		"Implementer",
+		"Reviewer",
+		"Codex binary path",
+		"Grok binary path",
+		"Tool status",
+		"API providers",
+		`action="/settings/agents"`,
+		`action="/settings/agents/api-providers"`,
+	} {
 		if !strings.Contains(body, marker) {
 			t.Fatalf("settings page missing %q", marker)
 		}
 	}
 	if strings.Contains(body, "data-theme-toggle") {
 		t.Fatalf("theme toggle should no longer live in the navigation rail")
+	}
+	if strings.Contains(body, "More settings will be added") || strings.Contains(body, "Coming later") {
+		t.Fatalf("settings page should no longer show the placeholder future-settings block")
 	}
 }
 
@@ -394,5 +416,1116 @@ func TestFolderPickerCanSelectProjectWorkingDirectory(t *testing.T) {
 		if !strings.Contains(body, marker) {
 			t.Fatalf("folder picker missing %q", marker)
 		}
+	}
+}
+
+func TestSupervisedPipelinePausesForHuman(t *testing.T) {
+	app := testApp(t)
+	project, err := app.createProject(context.Background(), "atlas", "Atlas", "A", "/tmp", AutonomySupervised)
+	if err != nil {
+		t.Fatal(err)
+	}
+	story, err := app.createStory(context.Background(), createStoryRequest{
+		ProjectID: project.ID, Title: "Supervised story", Description: "desc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue"); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := app.listStories(context.Background(), storyFilters{ProjectID: project.ID, Status: StatusQueued, ShowClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := app.createQueueRun(context.Background(), storyFilters{ProjectID: project.ID}, queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusInProgress, false, "running"); err != nil {
+		t.Fatal(err)
+	}
+
+	pc := pipelineContext{
+		QueueRunID: runID,
+		Project:    project,
+		Story:      story,
+		PRNumber:   42,
+		PRURL:      "https://github.com/acme/atlas/pull/42",
+	}
+	pipeline := StoryPipeline{
+		QueueRunID: runID,
+		StoryID:    story.ID,
+		Branch:     "ripple/A-001-supervised-story",
+		PRNumber:   42,
+		PRURL:      "https://github.com/acme/atlas/pull/42",
+		ReviewJSON: `{"approved":false,"summary":"needs work","comments":[]}`,
+	}
+	result, err := app.pausePipelineForHuman(context.Background(), pc, pipeline, "implemented")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.AwaitingHuman || result.FinalMessage != "implemented" {
+		t.Fatalf("result = %#v", result)
+	}
+
+	stored, err := app.getStoryPipeline(context.Background(), runID, story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Phase != PipelinePhaseAwaitingHuman {
+		t.Fatalf("pipeline phase = %q, want %q", stored.Phase, PipelinePhaseAwaitingHuman)
+	}
+	if stored.PRNumber != 42 || stored.PRURL == "" {
+		t.Fatalf("pipeline PR missing: %#v", stored)
+	}
+	if stored.Phase == PipelinePhaseMerge || stored.Phase == PipelinePhaseCompleted {
+		t.Fatalf("supervised pause must not complete merge path")
+	}
+
+	loaded, err := app.getStory(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != StatusInReview {
+		t.Fatalf("story status = %q, want %q", loaded.Status, StatusInReview)
+	}
+
+	events, err := app.listEvents(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, ev := range events {
+		if ev.Type == "awaiting_human_review" && strings.Contains(ev.Message, "pull/42") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("missing awaiting_human_review event: %#v", events)
+	}
+
+	// Queue item outcome: awaiting_human, not completed/merged.
+	completed, _, err := app.applyStoryPipelineOutcome(context.Background(), runID, story, result, 0, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed != 1 {
+		t.Fatalf("completed count = %d", completed)
+	}
+	items, err := app.listQueueRunItems(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Status != QueueItemAwaitingHuman {
+		t.Fatalf("queue items = %#v", items)
+	}
+	// Story must remain in_review (not flipped to done).
+	loaded, err = app.getStory(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != StatusInReview {
+		t.Fatalf("after outcome story status = %q, want %q", loaded.Status, StatusInReview)
+	}
+}
+
+func TestAutonomousPipelineOutcomeMarksDone(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	story := stories[0]
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue"); err != nil {
+		t.Fatal(err)
+	}
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, err := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusInProgress, false, "running"); err != nil {
+		t.Fatal(err)
+	}
+
+	result := pipelineResult{FinalMessage: "merged ok", AwaitingHuman: false}
+	completed, _, err := app.applyStoryPipelineOutcome(context.Background(), runID, story, result, 0, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed != 1 {
+		t.Fatalf("completed = %d", completed)
+	}
+	loaded, err := app.getStory(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != StatusDone {
+		t.Fatalf("autonomous outcome status = %q, want done", loaded.Status)
+	}
+	items, err := app.listQueueRunItems(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].Status != QueueItemCompleted {
+		t.Fatalf("queue item status = %q, want completed", items[0].Status)
+	}
+}
+
+func TestQueueContinuesAfterSupervisedPause(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 2)
+	for _, story := range stories {
+		if err := app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, err := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First story pauses for human; second completes autonomously.
+	if err := app.changeStoryStatus(context.Background(), stories[0].ID, StatusInProgress, false, "run"); err != nil {
+		t.Fatal(err)
+	}
+	project, err := app.getProject(context.Background(), "atlas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.updateProjectAutonomyMode(context.Background(), "atlas", AutonomySupervised); err != nil {
+		t.Fatal(err)
+	}
+	project, err = app.getProject(context.Background(), "atlas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result1, err := app.pausePipelineForHuman(context.Background(), pipelineContext{
+		QueueRunID: runID, Project: project, Story: stories[0],
+	}, StoryPipeline{
+		QueueRunID: runID, StoryID: stories[0].ID, PRNumber: 1, PRURL: "https://example.com/pull/1",
+	}, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, prev, err := app.applyStoryPipelineOutcome(context.Background(), runID, stories[0], result1, 0, 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed != 1 {
+		t.Fatalf("after first story completed count = %d", completed)
+	}
+
+	if err := app.changeStoryStatus(context.Background(), stories[1].ID, StatusInProgress, false, "run"); err != nil {
+		t.Fatal(err)
+	}
+	result2 := pipelineResult{FinalMessage: "second merged", AwaitingHuman: false}
+	completed, _, err = app.applyStoryPipelineOutcome(context.Background(), runID, stories[1], result2, completed, 2, prev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed != 2 {
+		t.Fatalf("after second story completed count = %d", completed)
+	}
+
+	items, err := app.listQueueRunItems(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items len = %d", len(items))
+	}
+	// Order matches queue positions (story order from seed).
+	byID := map[string]string{}
+	for _, item := range items {
+		byID[item.Story.ID] = item.Status
+	}
+	if byID[stories[0].ID] != QueueItemAwaitingHuman {
+		t.Fatalf("first item status = %q", byID[stories[0].ID])
+	}
+	if byID[stories[1].ID] != QueueItemCompleted {
+		t.Fatalf("second item status = %q", byID[stories[1].ID])
+	}
+
+	s0, _ := app.getStory(context.Background(), stories[0].ID)
+	s1, _ := app.getStory(context.Background(), stories[1].ID)
+	if s0.Status != StatusInReview {
+		t.Fatalf("first story status = %q", s0.Status)
+	}
+	if s1.Status != StatusDone {
+		t.Fatalf("second story status = %q", s1.Status)
+	}
+}
+
+func TestAddressFeedbackWrongStatusRejected(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	form := url.Values{"redirect": {"/projects/atlas/backlog"}}
+	req := httptest.NewRequest(http.MethodPost, "/stories/"+stories[0].ID+"/address-feedback", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "in review") {
+		t.Fatalf("error should mention in review: %s", res.Body.String())
+	}
+}
+
+func TestAddressFeedbackHappyPathReturnsToInReview(t *testing.T) {
+	app := testApp(t)
+	project, err := app.createProject(context.Background(), "atlas", "Atlas", "A", "/tmp", AutonomySupervised)
+	if err != nil {
+		t.Fatal(err)
+	}
+	story, err := app.createStory(context.Background(), createStoryRequest{
+		ProjectID: project.ID, Title: "Feedback story", Description: "desc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue"); err != nil {
+		t.Fatal(err)
+	}
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: project.ID, Status: StatusQueued, ShowClosed: true})
+	runID, err := app.createQueueRun(context.Background(), storyFilters{ProjectID: project.ID}, queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusInProgress, false, "run"); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := StoryPipeline{
+		QueueRunID: runID,
+		StoryID:    story.ID,
+		Phase:      PipelinePhaseAwaitingHuman,
+		Branch:     "ripple/A-001-feedback-story",
+		PRNumber:   9,
+		PRURL:      "https://github.com/acme/atlas/pull/9",
+		ReviewJSON: `{"approved":false,"summary":"needs work","comments":[{"path":"a.go","line":1,"body":"fix me"}]}`,
+	}
+	if err := app.upsertStoryPipeline(context.Background(), pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusInReview, false, "awaiting"); err != nil {
+		t.Fatal(err)
+	}
+
+	feedback := PRFeedback{
+		Items: []PRFeedbackItem{
+			{Kind: "issue_comment", Author: "human", Body: "Please rename the helper"},
+		},
+		AgentReviewJSON: pipeline.ReviewJSON,
+	}
+	// Simulate agent activity: record a fix run, then complete the supervised loop (no quality gate).
+	agentRunID, err := app.createAgentRun(context.Background(), runID, project, story, "prompt", RunKindCodexAddressFeedback, pipeline.Branch, pipeline.PRNumber, pipeline.PRURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.finishAgentStoryRun(context.Background(), agentRunID, "completed", "", "", "renamed helper", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusInProgress, false, "addressing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.completeAddressFeedback(context.Background(), story, pipeline, feedback, true, "renamed helper"); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := app.getStory(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != StatusInReview {
+		t.Fatalf("status = %q, want in_review", loaded.Status)
+	}
+	stored, err := app.getLatestStoryPipeline(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Phase != PipelinePhaseAwaitingHuman {
+		t.Fatalf("phase = %q, want awaiting_human", stored.Phase)
+	}
+	events, err := app.listEvents(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundAddressed := false
+	for _, ev := range events {
+		if ev.Type == eventFeedbackAddressed && strings.Contains(ev.Message, feedbackFingerprintPrefix) {
+			foundAddressed = true
+			break
+		}
+	}
+	if !foundAddressed {
+		t.Fatalf("missing feedback_addressed event: %#v", events)
+	}
+	// Second pass with same feedback must not start (no new comments).
+	if err := evaluateAddressFeedback(feedback, events); err == nil {
+		t.Fatal("expected no-new-comments rejection on second identical feedback")
+	}
+	// Agent run of address-feedback kind is recorded.
+	runs, err := app.listAgentStoryRuns(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundKind := false
+	for _, r := range runs {
+		if r.RunKind == RunKindCodexAddressFeedback {
+			foundKind = true
+			break
+		}
+	}
+	if !foundKind {
+		t.Fatalf("address-feedback run not recorded: %#v", runs)
+	}
+}
+
+func TestAddressFeedbackNoChangesEvent(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	story := stories[0]
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue"); err != nil {
+		t.Fatal(err)
+	}
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, _ := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	pipeline := StoryPipeline{QueueRunID: runID, StoryID: story.ID, Phase: PipelinePhaseAwaitingHuman, Branch: "b", PRNumber: 1, PRURL: "https://example.com/pull/1"}
+	_ = app.upsertStoryPipeline(context.Background(), pipeline)
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusInReview, false, "await")
+	feedback := PRFeedback{Items: []PRFeedbackItem{{Kind: "review", Author: "x", Body: "nits"}}}
+	if err := app.completeAddressFeedback(context.Background(), story, pipeline, feedback, false, "nothing to change"); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := app.listEvents(context.Background(), story.ID)
+	found := false
+	for _, ev := range events {
+		if ev.Type == eventFeedbackNoChanges {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected feedback_no_changes event: %#v", events)
+	}
+	loaded, _ := app.getStory(context.Background(), story.ID)
+	if loaded.Status != StatusInReview {
+		t.Fatalf("status = %q", loaded.Status)
+	}
+}
+
+func TestStoryPanelShowsAddressFeedbackForInReview(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	story := stories[0]
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue"); err != nil {
+		t.Fatal(err)
+	}
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, _ := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	_ = app.upsertStoryPipeline(context.Background(), StoryPipeline{
+		QueueRunID: runID, StoryID: story.ID, Phase: PipelinePhaseAwaitingHuman,
+		Branch: "ripple/branch", PRNumber: 3, PRURL: "https://github.com/acme/atlas/pull/3",
+	})
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusInReview, false, "await")
+
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/stories/"+story.ID+"/panel", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	body := res.Body.String()
+	for _, marker := range []string{
+		"Act on review comments",
+		`action="/stories/` + story.ID + `/address-feedback"`,
+		`action="/stories/` + story.ID + `/merge"`,
+		"Merge pull request",
+		"https://github.com/acme/atlas/pull/3",
+		"Open pull request",
+		"marks the story done",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("story panel missing %q", marker)
+		}
+	}
+}
+
+func TestHumanMergeWrongStatusRejected(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	form := url.Values{"redirect": {"/projects/atlas/backlog"}}
+	req := httptest.NewRequest(http.MethodPost, "/stories/"+stories[0].ID+"/merge", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "in review") {
+		t.Fatalf("error should mention in review: %s", res.Body.String())
+	}
+}
+
+func TestHumanMergeSuccessMarksDone(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	story := stories[0]
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue"); err != nil {
+		t.Fatal(err)
+	}
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, err := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeline := StoryPipeline{
+		QueueRunID:    runID,
+		StoryID:       story.ID,
+		Phase:         PipelinePhaseAwaitingHuman,
+		DefaultBranch: "main",
+		PRNumber:      11,
+		PRURL:         "https://github.com/acme/atlas/pull/11",
+	}
+	if err := app.upsertStoryPipeline(context.Background(), pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusInReview, false, "await"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.updateQueueRunItemStatus(context.Background(), runID, story.ID, QueueItemAwaitingHuman); err != nil {
+		t.Fatal(err)
+	}
+
+	origGate, origMerge := humanMergeQualityGate, humanMergePR
+	t.Cleanup(func() {
+		humanMergeQualityGate = origGate
+		humanMergePR = origMerge
+	})
+	humanMergeQualityGate = func(ctx context.Context, dir string) error { return nil }
+	humanMergePR = func(ctx context.Context, ghBin, dir string, prNumber int) error {
+		if prNumber != 11 {
+			t.Fatalf("prNumber = %d", prNumber)
+		}
+		return nil
+	}
+
+	project, err := app.getProject(context.Background(), "atlas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.executeHumanMerge(context.Background(), story, project, pipeline); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := app.getStory(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != StatusDone {
+		t.Fatalf("status = %q, want done", loaded.Status)
+	}
+	stored, err := app.getLatestStoryPipeline(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Phase != PipelinePhaseCompleted {
+		t.Fatalf("phase = %q, want completed", stored.Phase)
+	}
+	events, err := app.listEvents(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, ev := range events {
+		if ev.Type == eventMergedByHuman && strings.Contains(ev.Message, "PR #11") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("missing merged_by_human event: %#v", events)
+	}
+	items, err := app.listQueueRunItems(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].Status != QueueItemCompleted {
+		t.Fatalf("queue item status = %q, want completed", items[0].Status)
+	}
+}
+
+func TestHumanMergeQualityGateFailureStaysInReview(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	story := stories[0]
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue"); err != nil {
+		t.Fatal(err)
+	}
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, _ := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	pipeline := StoryPipeline{
+		QueueRunID: runID, StoryID: story.ID, Phase: PipelinePhaseAwaitingHuman,
+		DefaultBranch: "main", PRNumber: 5, PRURL: "https://example.com/pull/5",
+	}
+	_ = app.upsertStoryPipeline(context.Background(), pipeline)
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusInReview, false, "await")
+
+	origGate, origMerge := humanMergeQualityGate, humanMergePR
+	t.Cleanup(func() {
+		humanMergeQualityGate = origGate
+		humanMergePR = origMerge
+	})
+	humanMergeQualityGate = func(ctx context.Context, dir string) error {
+		return errors.New("go test failed: assertion error")
+	}
+	merged := false
+	humanMergePR = func(ctx context.Context, ghBin, dir string, prNumber int) error {
+		merged = true
+		return nil
+	}
+
+	project, _ := app.getProject(context.Background(), "atlas")
+	err := app.executeHumanMerge(context.Background(), story, project, pipeline)
+	if err == nil {
+		t.Fatal("expected quality gate error")
+	}
+	if !strings.Contains(err.Error(), "Quality gate failed") {
+		t.Fatalf("error = %v", err)
+	}
+	if merged {
+		t.Fatal("merge must not run after quality gate failure")
+	}
+	loaded, _ := app.getStory(context.Background(), story.ID)
+	if loaded.Status != StatusInReview {
+		t.Fatalf("status = %q, want in_review", loaded.Status)
+	}
+	stored, _ := app.getLatestStoryPipeline(context.Background(), story.ID)
+	if stored.Phase != PipelinePhaseAwaitingHuman {
+		t.Fatalf("phase = %q, want awaiting_human", stored.Phase)
+	}
+	if !strings.Contains(stored.Error, "go test failed") {
+		t.Fatalf("pipeline error = %q", stored.Error)
+	}
+	events, _ := app.listEvents(context.Background(), story.ID)
+	found := false
+	for _, ev := range events {
+		if ev.Type == eventQualityGateFailed {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("missing quality_gate_failed event: %#v", events)
+	}
+}
+
+func TestCompleteHumanMergeOnly(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	story := stories[0]
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue")
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, err := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusInReview, false, "await")
+	pipeline := StoryPipeline{QueueRunID: runID, StoryID: story.ID, Phase: PipelinePhaseMerge, PRNumber: 2, PRURL: "https://example.com/pull/2"}
+	if err := app.completeHumanMerge(context.Background(), story, pipeline); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _ := app.getStory(context.Background(), story.ID)
+	if loaded.Status != StatusDone {
+		t.Fatalf("status = %q", loaded.Status)
+	}
+}
+
+func TestBotAPICannotSetInReview(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	body := `{"status":"in_review"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/stories/"+stories[0].ID+"/status", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; body = %s", res.Code, res.Body.String())
+	}
+	loaded, err := app.getStory(context.Background(), stories[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status == StatusInReview {
+		t.Fatalf("bot must not set in_review")
+	}
+}
+
+func TestBoardAndBacklogShowInReview(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	if err := app.changeStoryStatus(context.Background(), stories[0].ID, StatusInReview, false, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/board?projectId=atlas", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("board status = %d", res.Code)
+	}
+	body := res.Body.String()
+	for _, marker := range []string{"In Review", `column-in_review`, stories[0].Title, `value="in_review"`} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("board missing %q", marker)
+		}
+	}
+
+	res = httptest.NewRecorder()
+	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/projects/atlas/backlog?status=in_review", nil))
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), stories[0].Title) {
+		t.Fatalf("backlog in_review filter failed: %d %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "In review") {
+		t.Fatalf("backlog missing In review tab")
+	}
+}
+
+func TestNormalizeAutonomyMode(t *testing.T) {
+	cases := map[string]string{
+		"":             AutonomyAutonomous,
+		"  ":           AutonomyAutonomous,
+		"autonomous":   AutonomyAutonomous,
+		"Autonomous":   AutonomyAutonomous,
+		"supervised":   AutonomySupervised,
+		"SUPERVISED":   AutonomySupervised,
+		" supervised ": AutonomySupervised,
+		"manual":       AutonomyAutonomous,
+		"invalid":      AutonomyAutonomous,
+	}
+	for input, want := range cases {
+		if got := normalizeAutonomyMode(input); got != want {
+			t.Fatalf("normalizeAutonomyMode(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestProjectAutonomyModeRoundTrip(t *testing.T) {
+	app := testApp(t)
+	project, err := app.createProject(context.Background(), "atlas", "Atlas", "A", "/tmp", AutonomySupervised)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.AutonomyMode != AutonomySupervised {
+		t.Fatalf("createProject autonomyMode = %q, want %q", project.AutonomyMode, AutonomySupervised)
+	}
+	loaded, err := app.getProject(context.Background(), "atlas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.AutonomyMode != AutonomySupervised {
+		t.Fatalf("getProject autonomyMode = %q, want %q", loaded.AutonomyMode, AutonomySupervised)
+	}
+	if err := app.updateProjectAutonomyMode(context.Background(), "atlas", AutonomyAutonomous); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = app.getProject(context.Background(), "atlas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.AutonomyMode != AutonomyAutonomous {
+		t.Fatalf("after update autonomyMode = %q, want %q", loaded.AutonomyMode, AutonomyAutonomous)
+	}
+	if err := app.updateProjectAutonomyMode(context.Background(), "atlas", "not-a-mode"); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = app.getProject(context.Background(), "atlas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.AutonomyMode != AutonomyAutonomous {
+		t.Fatalf("invalid value should normalize to autonomous, got %q", loaded.AutonomyMode)
+	}
+}
+
+func TestProjectAutonomyModeDefaultsAutonomous(t *testing.T) {
+	app := testApp(t)
+	project, err := app.createProject(context.Background(), "atlas", "Atlas", "A", "/tmp", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.AutonomyMode != AutonomyAutonomous {
+		t.Fatalf("default autonomyMode = %q, want %q", project.AutonomyMode, AutonomyAutonomous)
+	}
+	// Existing rows with empty/invalid stored values normalize on read.
+	if _, err := app.db.ExecContext(context.Background(), `UPDATE projects SET autonomy_mode = '' WHERE id = ?`, "atlas"); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := app.getProject(context.Background(), "atlas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.AutonomyMode != AutonomyAutonomous {
+		t.Fatalf("empty DB value should normalize to autonomous, got %q", loaded.AutonomyMode)
+	}
+}
+
+func TestProjectSettingsFormPostsAutonomyMode(t *testing.T) {
+	app := testApp(t)
+	seedProjectStories(t, app, "atlas", 1)
+
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/projects/atlas/backlog", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("backlog status = %d", res.Code)
+	}
+	body := res.Body.String()
+	for _, marker := range []string{
+		`action="/projects/atlas/settings"`,
+		`name="autonomyMode"`,
+		`value="autonomous"`,
+		`value="supervised"`,
+		"Save settings",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("backlog project settings missing %q", marker)
+		}
+	}
+
+	form := url.Values{
+		"workingDirectory": {"/tmp"},
+		"autonomyMode":     {AutonomySupervised},
+		"redirect":         {"/projects/atlas/backlog"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/projects/atlas/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res = httptest.NewRecorder()
+	app.routes().ServeHTTP(res, req)
+	if res.Code != http.StatusSeeOther && res.Code != http.StatusOK {
+		t.Fatalf("settings post status = %d; body = %s", res.Code, res.Body.String())
+	}
+	project, err := app.getProject(context.Background(), "atlas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.AutonomyMode != AutonomySupervised {
+		t.Fatalf("after form post autonomyMode = %q, want %q", project.AutonomyMode, AutonomySupervised)
+	}
+
+	// API list/create include autonomyMode.
+	res = httptest.NewRecorder()
+	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/projects", nil))
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"autonomyMode":"supervised"`) {
+		t.Fatalf("API list projects missing autonomyMode; body = %s", res.Body.String())
+	}
+
+	createBody := `{"id":"nova","name":"Nova","prefix":"N","workingDirectory":"/tmp","autonomyMode":"supervised"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/projects", strings.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	res = httptest.NewRecorder()
+	app.routes().ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("API create status = %d; body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `"autonomyMode":"supervised"`) {
+		t.Fatalf("API create response missing autonomyMode; body = %s", res.Body.String())
+	}
+}
+
+func TestBuildRunCompletionSummaryDistinguishesAwaitingHuman(t *testing.T) {
+	finished := time.Now().UTC()
+	run := QueueRunSummary{ID: 1, Status: "completed", Total: 2, Completed: 2, StartedAt: finished.Add(-2 * time.Minute), FinishedAt: &finished}
+	storyRuns := []AgentRunSummary{
+		{StoryID: "A-001", StoryTitle: "One", PRNumber: 10, PRURL: "https://example.com/pull/10", Branch: "b1"},
+		{StoryID: "A-002", StoryTitle: "Two", PRNumber: 11, PRURL: "https://example.com/pull/11", Branch: "b2"},
+		// Second agent pass on same PR should not duplicate.
+		{StoryID: "A-001", StoryTitle: "One", PRNumber: 10, PRURL: "https://example.com/pull/10", Branch: "b1", RunKind: RunKindGrokReview},
+	}
+	items := []QueueRunItem{
+		{Story: Story{ID: "A-001", Title: "One"}, Status: QueueItemAwaitingHuman},
+		{Story: Story{ID: "A-002", Title: "Two"}, Status: QueueItemCompleted},
+	}
+	summary := buildRunCompletionSummary(run, storyRuns, items)
+	if summary.MergedCount != 1 {
+		t.Fatalf("MergedCount = %d, want 1", summary.MergedCount)
+	}
+	if summary.AwaitingHumanCount != 1 {
+		t.Fatalf("AwaitingHumanCount = %d, want 1", summary.AwaitingHumanCount)
+	}
+	if len(summary.MergedPRs) != 1 || summary.MergedPRs[0].Number != 11 {
+		t.Fatalf("MergedPRs = %#v", summary.MergedPRs)
+	}
+	if len(summary.AwaitingHumanPRs) != 1 || summary.AwaitingHumanPRs[0].Number != 10 {
+		t.Fatalf("AwaitingHumanPRs = %#v", summary.AwaitingHumanPRs)
+	}
+	if summary.Elapsed == "" {
+		t.Fatal("expected elapsed time")
+	}
+}
+
+func TestEventAndQueueItemTitles(t *testing.T) {
+	if got := eventTitle(eventAwaitingHumanReview); got != "Awaiting your review" {
+		t.Fatalf("eventTitle awaiting = %q", got)
+	}
+	if got := eventTitle(eventAddressingFeedback); got != "Addressing feedback" {
+		t.Fatalf("eventTitle addressing = %q", got)
+	}
+	if got := eventTitle(eventMergedByHuman); got != "Merged by you" {
+		t.Fatalf("eventTitle merged by human = %q", got)
+	}
+	if got := eventTitle(eventMergedExternally); got != "Synced external merge" {
+		t.Fatalf("eventTitle external = %q", got)
+	}
+	if got := queueItemStatusTitle(QueueItemAwaitingHuman); got != "waiting on you" {
+		t.Fatalf("queue item title = %q", got)
+	}
+	if got := queueItemStatusTitle(QueueItemCompleted); got != "merged" {
+		t.Fatalf("queue item completed title = %q", got)
+	}
+}
+
+func TestStoryPanelShowsSyncPRForInReview(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	story := stories[0]
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue")
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, _ := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	_ = app.upsertStoryPipeline(context.Background(), StoryPipeline{
+		QueueRunID: runID, StoryID: story.ID, Phase: PipelinePhaseAwaitingHuman,
+		Branch: "ripple/branch", PRNumber: 3, PRURL: "https://github.com/acme/atlas/pull/3",
+	})
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusInReview, false, "await")
+
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/stories/"+story.ID+"/panel", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	body := res.Body.String()
+	for _, marker := range []string{
+		"Sync PR status",
+		`action="/stories/` + story.ID + `/sync-pr"`,
+		"already merged on GitHub",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("story panel missing %q", marker)
+		}
+	}
+}
+
+func TestStoryPanelHistoryUsesEventTitles(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	story := stories[0]
+	if err := app.addEvent(context.Background(), story.ID, eventAwaitingHumanReview, "waiting for you"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.addEvent(context.Background(), story.ID, eventMergedByHuman, "merged"); err != nil {
+		t.Fatal(err)
+	}
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/stories/"+story.ID+"/panel", nil))
+	body := res.Body.String()
+	if !strings.Contains(body, "Awaiting your review") {
+		t.Fatalf("panel missing human-readable awaiting event: %s", body)
+	}
+	if !strings.Contains(body, "Merged by you") {
+		t.Fatalf("panel missing human-readable merge event: %s", body)
+	}
+	if strings.Contains(body, "<strong>awaiting_human_review</strong>") {
+		t.Fatal("panel still shows raw event type awaiting_human_review")
+	}
+}
+
+func TestAboutPageMentionsSupervisedFlow(t *testing.T) {
+	app := testApp(t)
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/about", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	body := res.Body.String()
+	for _, marker := range []string{"In review", "Supervised", "Autonomous", "Done always means merged"} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("about page missing %q", marker)
+		}
+	}
+}
+
+func TestSyncExternalPRMergeSuccess(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	story := stories[0]
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue")
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, err := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeline := StoryPipeline{
+		QueueRunID:    runID,
+		StoryID:       story.ID,
+		Phase:         PipelinePhaseAwaitingHuman,
+		DefaultBranch: "main",
+		Branch:        "ripple/feature",
+		PRNumber:      22,
+		PRURL:         "https://github.com/acme/atlas/pull/22",
+	}
+	if err := app.upsertStoryPipeline(context.Background(), pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.changeStoryStatus(context.Background(), story.ID, StatusInReview, false, "await"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.updateQueueRunItemStatus(context.Background(), runID, story.ID, QueueItemAwaitingHuman); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := checkPRMerged
+	t.Cleanup(func() { checkPRMerged = orig })
+	checkPRMerged = func(ctx context.Context, ghBin, dir string, prNumber int) (bool, error) {
+		if prNumber != 22 {
+			t.Fatalf("prNumber = %d", prNumber)
+		}
+		return true, nil
+	}
+
+	if err := app.syncExternalPRMerge(context.Background(), story.ID); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := app.getStory(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != StatusDone {
+		t.Fatalf("status = %q, want done", loaded.Status)
+	}
+	stored, err := app.getLatestStoryPipeline(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Phase != PipelinePhaseCompleted {
+		t.Fatalf("phase = %q, want completed", stored.Phase)
+	}
+	events, err := app.listEvents(context.Background(), story.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, ev := range events {
+		if ev.Type == eventMergedExternally && strings.Contains(ev.Message, "PR #22") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("missing merged_externally event: %#v", events)
+	}
+	items, err := app.listQueueRunItems(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].Status != QueueItemCompleted {
+		t.Fatalf("queue item status = %q, want completed", items[0].Status)
+	}
+}
+
+func TestSyncExternalPRNotMergedRejected(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	story := stories[0]
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue")
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, _ := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	_ = app.upsertStoryPipeline(context.Background(), StoryPipeline{
+		QueueRunID: runID, StoryID: story.ID, Phase: PipelinePhaseAwaitingHuman, PRNumber: 9, PRURL: "https://example.com/pull/9",
+	})
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusInReview, false, "await")
+
+	orig := checkPRMerged
+	t.Cleanup(func() { checkPRMerged = orig })
+	checkPRMerged = func(ctx context.Context, ghBin, dir string, prNumber int) (bool, error) {
+		return false, nil
+	}
+
+	err := app.syncExternalPRMerge(context.Background(), story.ID)
+	if err == nil {
+		t.Fatal("expected error when PR not merged")
+	}
+	if !strings.Contains(err.Error(), "not merged") {
+		t.Fatalf("error = %v", err)
+	}
+	loaded, _ := app.getStory(context.Background(), story.ID)
+	if loaded.Status != StatusInReview {
+		t.Fatalf("status = %q, want in_review", loaded.Status)
+	}
+}
+
+func TestSyncExternalPRWrongStatusRejected(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	form := url.Values{"redirect": {"/projects/atlas/backlog"}}
+	req := httptest.NewRequest(http.MethodPost, "/stories/"+stories[0].ID+"/sync-pr", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "in review") {
+		t.Fatalf("error should mention in review: %s", res.Body.String())
+	}
+}
+
+func TestRunPageShowsAwaitingHumanSummary(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	story := stories[0]
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue")
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, err := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := app.getProject(context.Background(), "atlas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentRunID, err := app.createAgentRun(context.Background(), runID, project, story, "prompt", RunKindCodexImplement, "ripple/branch", 7, "https://example.com/pull/7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.finishAgentStoryRun(context.Background(), agentRunID, "completed", "", "", "implemented", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.updateQueueRunItemStatus(context.Background(), runID, story.ID, QueueItemAwaitingHuman); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.updateQueueRun(context.Background(), runID, "completed", "Queue run complete", 1, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/projects/atlas/runs/%d", runID), nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d; body = %s", res.Code, res.Body.String())
+	}
+	body := res.Body.String()
+	for _, marker := range []string{
+		"waiting on you",
+		"Awaiting you",
+		"Pull requests awaiting your review",
+		"https://example.com/pull/7",
+		"Queue finished",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("run page missing %q in body", marker)
+		}
+	}
+	if strings.Contains(body, "Pull requests created and merged") {
+		t.Fatal("run page must not claim all PRs were merged for supervised pause")
+	}
+	if strings.Contains(body, "Work finished successfully") {
+		t.Fatal("run page must not say work finished successfully when stories await human")
 	}
 }

@@ -13,6 +13,7 @@
           <option value="backlog" {{if eq .Story.Status "backlog"}}selected{{end}}>Backlog</option>
           <option value="queued" {{if eq .Story.Status "queued"}}selected{{end}}>Queued</option>
           <option value="in_progress" {{if eq .Story.Status "in_progress"}}selected{{end}}>In progress</option>
+          <option value="in_review" {{if eq .Story.Status "in_review"}}selected{{end}}>In review</option>
           <option value="done" {{if eq .Story.Status "done"}}selected{{end}}>Done</option>
           {{if eq .Story.Status "closed"}}<option value="closed" selected disabled>Closed</option>{{end}}
         </select>
@@ -20,6 +21,37 @@
     </form>
   </div>
 </div>
+
+{{if eq .Story.Status "in_review"}}
+<section class="story-detail-section supervised-actions">
+  <div>
+    <h3>In review</h3>
+    <p>The agent opened a PR and posted a review. Act on feedback as needed, then merge when ready.</p>
+    {{if and .Pipeline .Pipeline.PRURL}}
+    <p class="pr-link-row"><a href="{{.Pipeline.PRURL}}" target="_blank" rel="noopener">Open pull request{{if .Pipeline.PRNumber}} #{{.Pipeline.PRNumber}}{{end}}</a>{{if .Pipeline.Branch}} <span class="mono muted">{{.Pipeline.Branch}}</span>{{end}}</p>
+    {{else}}
+    <p class="muted">No pull request is linked on the pipeline record for this story.</p>
+    {{end}}
+  </div>
+  <div class="supervised-action-forms">
+    <form method="post" action="/stories/{{.Story.ID}}/address-feedback" data-current-redirect class="supervised-action-form">
+      <input type="hidden" name="redirect">
+      <button type="submit" class="primary-button" {{if or (not .Pipeline) (not .Pipeline.PRURL)}}disabled{{end}} onclick="this.form.elements.redirect.value=location.pathname+location.search">Act on review comments</button>
+      <p class="muted settings-help">Have the agent read the latest PR feedback and push fixes. The story will wait for you again. No quality gate runs on this step.</p>
+    </form>
+    <form method="post" action="/stories/{{.Story.ID}}/merge" data-current-redirect class="supervised-action-form">
+      <input type="hidden" name="redirect">
+      <button type="submit" class="secondary-button" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}} onclick="this.form.elements.redirect.value=location.pathname+location.search">Merge pull request</button>
+      <p class="muted settings-help">Runs checks, merges the PR, and marks the story done.</p>
+    </form>
+    <form method="post" action="/stories/{{.Story.ID}}/sync-pr" data-current-redirect class="supervised-action-form">
+      <input type="hidden" name="redirect">
+      <button type="submit" class="secondary-button" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}} onclick="this.form.elements.redirect.value=location.pathname+location.search">Sync PR status</button>
+      <p class="muted settings-help">If you already merged on GitHub, update the story to done without merging again.</p>
+    </form>
+  </div>
+</section>
+{{end}}
 
 <section class="story-detail-section description">
   <h3>Description</h3>
@@ -34,7 +66,7 @@
   <h3>History</h3>
   {{range .Events}}
   <div class="event">
-    <strong>{{.Type}}</strong>
+    <strong>{{eventTitle .Type}}</strong>
     <span>{{.CreatedAt.Format "2006-01-02 15:04"}}</span>
     <p>{{.Message}}</p>
   </div>

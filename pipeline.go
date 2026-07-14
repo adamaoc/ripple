@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,37 +16,40 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
 const (
-	RunKindCodexImplement = "codex_implement"
-	RunKindGrokReview     = "grok_review"
-	RunKindCodexFix       = "codex_fix"
+	RunKindCodexImplement       = "codex_implement"
+	RunKindGrokReview           = "grok_review"
+	RunKindCodexFix             = "codex_fix"
+	RunKindCodexAddressFeedback = "codex_address_feedback"
 
-	PipelinePhasePreflight   = "preflight"
-	PipelinePhaseBranching   = "branching"
-	PipelinePhaseImplement   = "implementing"
-	PipelinePhasePush        = "pushing"
-	PipelinePhaseCreatePR    = "creating_pr"
-	PipelinePhaseReview      = "reviewing"
-	PipelinePhaseFix         = "fixing"
-	PipelinePhaseQualityGate = "quality_gate"
-	PipelinePhaseMerge       = "merging"
-	PipelinePhaseCompleted   = "completed"
+	feedbackFingerprintPrefix = "feedback_fingerprint:"
+	eventAwaitingHumanReview  = "awaiting_human_review"
+	eventAddressingFeedback   = "addressing_feedback"
+	eventFeedbackAddressed    = "feedback_addressed"
+	eventFeedbackNoChanges    = "feedback_no_changes"
+
+	PipelinePhasePreflight       = "preflight"
+	PipelinePhaseBranching       = "branching"
+	PipelinePhaseImplement       = "implementing"
+	PipelinePhasePush            = "pushing"
+	PipelinePhaseCreatePR        = "creating_pr"
+	PipelinePhaseReview          = "reviewing"
+	PipelinePhaseFix             = "fixing"
+	PipelinePhaseQualityGate     = "quality_gate"
+	PipelinePhaseMerge           = "merging"
+	PipelinePhaseAwaitingHuman   = "awaiting_human"
+	PipelinePhaseAddressFeedback = "addressing_feedback"
+	PipelinePhaseCompleted       = "completed"
 )
 
-type GrokReviewComment struct {
-	Path string `json:"path"`
-	Line int    `json:"line"`
-	Body string `json:"body"`
-}
-
-type GrokReview struct {
-	Approved bool                `json:"approved"`
-	Summary  string              `json:"summary"`
-	Comments []GrokReviewComment `json:"comments"`
+// pipelineResult is the successful outcome of runStoryPipeline.
+// AwaitingHuman means supervised mode paused after PR + agent review (story is in_review).
+type pipelineResult struct {
+	FinalMessage  string
+	AwaitingHuman bool
 }
 
 type StoryPipeline struct {
@@ -99,36 +105,6 @@ func resolveGhBinary() (string, error) {
 		return "", badRequest("GitHub CLI (gh) was not found. Install gh and authenticate with `gh auth login`, or set RIPPLE_GH_BIN.")
 	}
 	return path, nil
-}
-
-func resolveGrokBinary() (string, error) {
-	candidates := []string{}
-	if configured := firstEnv("RIPPLE_GROK_BIN", "TASKMANAGER_GROK_BIN"); configured != "" {
-		candidates = append(candidates, configured)
-	}
-	candidates = append(candidates,
-		"grok",
-		filepath.Join(os.Getenv("HOME"), ".grok", "bin", "grok"),
-		"/opt/homebrew/bin/grok",
-		"/usr/local/bin/grok",
-	)
-	for _, candidate := range candidates {
-		if strings.ContainsRune(candidate, filepath.Separator) {
-			expanded, err := expandUserPath(candidate)
-			if err != nil {
-				return "", err
-			}
-			info, err := os.Stat(expanded)
-			if err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
-				return expanded, nil
-			}
-			continue
-		}
-		if path, err := osexec.LookPath(candidate); err == nil {
-			return path, nil
-		}
-	}
-	return "", badRequest("Grok CLI was not found. Set RIPPLE_GROK_BIN to the grok executable path, for example ~/.grok/bin/grok.")
 }
 
 func runCommand(ctx context.Context, dir string, name string, args ...string) (string, string, error) {
@@ -363,6 +339,32 @@ func ghPRMerge(ctx context.Context, ghBin, dir string, prNumber int) error {
 	return nil
 }
 
+// ghPRIsMerged reports whether the given pull request is already merged on GitHub.
+func ghPRIsMerged(ctx context.Context, ghBin, dir string, prNumber int) (bool, error) {
+	stdout, stderr, err := runCommand(ctx, dir, ghBin, "pr", "view", fmt.Sprintf("%d", prNumber), "--json", "state,mergedAt")
+	if err != nil {
+		detail := strings.TrimSpace(stderr)
+		if detail == "" {
+			detail = err.Error()
+		}
+		return false, fmt.Errorf("check PR status failed: %s", detail)
+	}
+	var view struct {
+		State    string `json:"state"`
+		MergedAt string `json:"mergedAt"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &view); err != nil {
+		return false, fmt.Errorf("parse PR status: %w", err)
+	}
+	if strings.EqualFold(view.State, "MERGED") {
+		return true, nil
+	}
+	if strings.TrimSpace(view.MergedAt) != "" {
+		return true, nil
+	}
+	return false, nil
+}
+
 func runQualityGate(ctx context.Context, dir string) error {
 	checks := qualityGateChecks(dir)
 	if len(checks) == 0 {
@@ -472,6 +474,233 @@ func buildCodexFixPrompt(baseURL, botDocs string, project Project, story Story, 
 	return b.String()
 }
 
+// PRFeedback is review input collected for a supervised "Act on review comments" pass.
+type PRFeedback struct {
+	Items           []PRFeedbackItem
+	AgentReviewJSON string
+}
+
+type PRFeedbackItem struct {
+	Kind   string // review | review_comment | issue_comment
+	Author string
+	Body   string
+	Path   string
+	Line   int
+}
+
+func (f PRFeedback) HasActionableComments() bool {
+	for _, item := range f.Items {
+		if strings.TrimSpace(item.Body) != "" {
+			return true
+		}
+	}
+	return agentReviewHasActionableContent(f.AgentReviewJSON)
+}
+
+func agentReviewHasActionableContent(reviewJSON string) bool {
+	reviewJSON = strings.TrimSpace(reviewJSON)
+	if reviewJSON == "" {
+		return false
+	}
+	review, err := parseGrokReview(reviewJSON)
+	if err != nil {
+		return true
+	}
+	if strings.TrimSpace(review.Summary) != "" {
+		return true
+	}
+	for _, c := range review.Comments {
+		if strings.TrimSpace(c.Body) != "" {
+			return true
+		}
+	}
+	return !review.Approved
+}
+
+func feedbackFingerprint(f PRFeedback) string {
+	var b strings.Builder
+	for _, item := range f.Items {
+		fmt.Fprintf(&b, "%s|%s|%s|%s|%d\n", item.Kind, item.Author, strings.TrimSpace(item.Body), item.Path, item.Line)
+	}
+	b.WriteString("agent:")
+	b.WriteString(strings.TrimSpace(f.AgentReviewJSON))
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+func lastFeedbackFingerprint(events []StoryEvent) string {
+	for _, ev := range events {
+		if ev.Type != eventFeedbackAddressed && ev.Type != eventFeedbackNoChanges {
+			continue
+		}
+		if idx := strings.Index(ev.Message, feedbackFingerprintPrefix); idx >= 0 {
+			return strings.TrimSpace(ev.Message[idx+len(feedbackFingerprintPrefix):])
+		}
+	}
+	return ""
+}
+
+func evaluateAddressFeedback(feedback PRFeedback, events []StoryEvent) error {
+	if !feedback.HasActionableComments() {
+		return badRequest("No review comments found to act on. Leave feedback on the pull request, then try again. The story stays in review.")
+	}
+	fp := feedbackFingerprint(feedback)
+	if prev := lastFeedbackFingerprint(events); prev != "" && prev == fp {
+		return badRequest("No new review comments since the last fix pass. Add feedback on the pull request, then try again. The story stays in review.")
+	}
+	return nil
+}
+
+func (f PRFeedback) FormatForPrompt() string {
+	var b strings.Builder
+	if len(f.Items) == 0 {
+		b.WriteString("(No pull request comments were collected from GitHub.)\n")
+	} else {
+		for i, item := range f.Items {
+			fmt.Fprintf(&b, "%d. [%s] %s", i+1, item.Kind, item.Author)
+			if item.Path != "" {
+				fmt.Fprintf(&b, " · %s", item.Path)
+				if item.Line > 0 {
+					fmt.Fprintf(&b, ":%d", item.Line)
+				}
+			}
+			fmt.Fprintf(&b, "\n%s\n\n", strings.TrimSpace(item.Body))
+		}
+	}
+	if strings.TrimSpace(f.AgentReviewJSON) != "" {
+		fmt.Fprintf(&b, "---\nPrior agent review JSON (secondary context):\n%s\n", f.AgentReviewJSON)
+	}
+	return b.String()
+}
+
+func buildCodexAddressFeedbackPrompt(baseURL, botDocs string, project Project, story Story, branch string, prNumber int, prURL string, feedback PRFeedback) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "You are being run by Ripple to address pull request review comments for a supervised story.\n\n")
+	fmt.Fprintf(&b, "# Working Rules\n\n")
+	fmt.Fprintf(&b, "- You are on feature branch `%s` for PR #%d (%s).\n", branch, prNumber, prURL)
+	fmt.Fprintf(&b, "- Prioritize **human** review comments and issue comments on the PR. Treat them as the primary source of truth.\n")
+	fmt.Fprintf(&b, "- Use the prior agent review only as secondary context when it does not conflict with human feedback.\n")
+	fmt.Fprintf(&b, "- Do not merge the PR, push, change story status, or create a new branch. Ripple commits and pushes after you finish.\n")
+	fmt.Fprintf(&b, "- Run relevant tests and linting and fix failures before finishing.\n")
+	fmt.Fprintf(&b, "- The sandbox may block network access, writes outside the project, and localhost servers. Do not repeatedly retry commands that fail for those reasons.\n")
+	fmt.Fprintf(&b, "- Do not use network-backed package loaders such as `pnpm dlx` or `npx` unless the required package is already cached.\n")
+	fmt.Fprintf(&b, "- Leave all fixes as local file changes. The orchestrator will commit and push after you finish.\n")
+	fmt.Fprintf(&b, "- If nothing needs changing, explain that briefly in your final response and leave the tree clean.\n\n")
+	fmt.Fprintf(&b, "# Review Feedback (human comments first)\n\n%s\n", feedback.FormatForPrompt())
+	fmt.Fprintf(&b, "# Ripple API\n\nBase URL: %s\n\nBot docs:\n\n%s\n\n", baseURL, botDocs)
+	fmt.Fprintf(&b, "# Project\n\nName: %s\nWorking directory: %s\n\n", project.Name, project.WorkingDirectory)
+	fmt.Fprintf(&b, "# Story\n\nID: %s\nTitle: %s\n\nDescription:\n%s\n", story.ID, story.Title, story.Description)
+	return b.String()
+}
+
+func ghCollectPRFeedback(ctx context.Context, ghBin, dir string, prNumber int, agentReviewJSON string) (PRFeedback, error) {
+	feedback := PRFeedback{AgentReviewJSON: strings.TrimSpace(agentReviewJSON)}
+	stdout, stderr, err := runCommand(ctx, dir, ghBin, "pr", "view", fmt.Sprintf("%d", prNumber), "--json", "reviews,comments")
+	if err != nil {
+		detail := strings.TrimSpace(stderr)
+		if detail == "" {
+			detail = err.Error()
+		}
+		return PRFeedback{}, fmt.Errorf("collect PR reviews/comments failed: %s", detail)
+	}
+	var view struct {
+		Reviews []struct {
+			Author struct {
+				Login string `json:"login"`
+			} `json:"author"`
+			Body  string `json:"body"`
+			State string `json:"state"`
+		} `json:"reviews"`
+		Comments []struct {
+			Author struct {
+				Login string `json:"login"`
+			} `json:"author"`
+			Body string `json:"body"`
+			Path string `json:"path"`
+			Line int    `json:"line"`
+		} `json:"comments"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &view); err != nil {
+		return PRFeedback{}, fmt.Errorf("parse PR review payload: %w", err)
+	}
+	for _, review := range view.Reviews {
+		body := strings.TrimSpace(review.Body)
+		if body == "" {
+			continue
+		}
+		author := strings.TrimSpace(review.Author.Login)
+		if author == "" {
+			author = "unknown"
+		}
+		if state := strings.TrimSpace(review.State); state != "" {
+			body = fmt.Sprintf("(%s) %s", state, body)
+		}
+		feedback.Items = append(feedback.Items, PRFeedbackItem{
+			Kind: "review", Author: author, Body: body,
+		})
+	}
+	for _, comment := range view.Comments {
+		body := strings.TrimSpace(comment.Body)
+		if body == "" {
+			continue
+		}
+		author := strings.TrimSpace(comment.Author.Login)
+		if author == "" {
+			author = "unknown"
+		}
+		feedback.Items = append(feedback.Items, PRFeedbackItem{
+			Kind: "review_comment", Author: author, Body: body, Path: comment.Path, Line: comment.Line,
+		})
+	}
+
+	repoStdout, _, repoErr := runCommand(ctx, dir, ghBin, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+	if repoErr == nil {
+		repo := strings.TrimSpace(repoStdout)
+		if repo != "" {
+			apiPath := fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNumber)
+			issueOut, issueErrOut, issueErr := runCommand(ctx, dir, ghBin, "api", apiPath)
+			if issueErr != nil {
+				detail := strings.TrimSpace(issueErrOut)
+				if detail == "" {
+					detail = issueErr.Error()
+				}
+				return PRFeedback{}, fmt.Errorf("collect PR issue comments failed: %s", detail)
+			}
+			var issueComments []struct {
+				User struct {
+					Login string `json:"login"`
+				} `json:"user"`
+				Body string `json:"body"`
+			}
+			if err := json.Unmarshal([]byte(issueOut), &issueComments); err != nil {
+				return PRFeedback{}, fmt.Errorf("parse PR issue comments: %w", err)
+			}
+			for _, comment := range issueComments {
+				body := strings.TrimSpace(comment.Body)
+				if body == "" {
+					continue
+				}
+				author := strings.TrimSpace(comment.User.Login)
+				if author == "" {
+					author = "unknown"
+				}
+				feedback.Items = append(feedback.Items, PRFeedbackItem{
+					Kind: "issue_comment", Author: author, Body: body,
+				})
+			}
+		}
+	}
+	return feedback, nil
+}
+
+func gitWorkingTreeDirty(ctx context.Context, dir string) (bool, error) {
+	status, _, err := runCommand(ctx, dir, "git", "status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(status) != "", nil
+}
+
 func buildGrokReviewPrompt(story Story, prNumber int, prURL, diff string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are reviewing a pull request for Ripple.\n\n")
@@ -485,32 +714,6 @@ func buildGrokReviewPrompt(story Story, prNumber int, prURL, diff string) string
 	fmt.Fprintf(&b, "Use comments only for actionable fixes. Keep the summary concise.\n\n")
 	fmt.Fprintf(&b, "# PR Diff\n\n```diff\n%s\n```\n", truncate(diff, 120000))
 	return b.String()
-}
-
-func parseGrokReview(text string) (GrokReview, error) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return GrokReview{}, errors.New("empty Grok review response")
-	}
-	if review, err := decodeGrokReviewJSON(text); err == nil {
-		return review, nil
-	}
-	start := strings.Index(text, "{")
-	end := strings.LastIndex(text, "}")
-	if start >= 0 && end > start {
-		if review, err := decodeGrokReviewJSON(text[start : end+1]); err == nil {
-			return review, nil
-		}
-	}
-	return GrokReview{}, fmt.Errorf("could not parse Grok review JSON from response: %s", truncate(text, 400))
-}
-
-func decodeGrokReviewJSON(text string) (GrokReview, error) {
-	var review GrokReview
-	if err := json.Unmarshal([]byte(text), &review); err != nil {
-		return GrokReview{}, err
-	}
-	return review, nil
 }
 
 func reviewNeedsFix(review GrokReview) bool {
@@ -527,7 +730,7 @@ func reviewNeedsFix(review GrokReview) bool {
 
 func formatReviewForPR(review GrokReview) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "## Grok review\n\n%s\n", strings.TrimSpace(review.Summary))
+	fmt.Fprintf(&b, "## Agent review\n\n%s\n", strings.TrimSpace(review.Summary))
 	if len(review.Comments) > 0 {
 		fmt.Fprintf(&b, "\n### Feedback\n")
 		for _, comment := range review.Comments {
@@ -549,8 +752,9 @@ func formatReviewForPR(review GrokReview) string {
 	return b.String()
 }
 
-func (a *App) runGrokHeadless(ctx context.Context, queueRunID int64, baseURL string, project Project, story Story, prompt, runKind string) (string, error) {
-	grokBin, err := resolveGrokBinary()
+// runReviewerForStory runs the configured reviewer (Grok CLI or HTTP API).
+func (a *App) runReviewerForStory(ctx context.Context, queueRunID int64, baseURL string, project Project, story Story, prompt, runKind string) (string, error) {
+	runner, err := a.newReviewerRunner(context.Background())
 	if err != nil {
 		return "", err
 	}
@@ -563,42 +767,20 @@ func (a *App) runGrokHeadless(ctx context.Context, queueRunID int64, baseURL str
 			_ = a.updateAgentStoryRunOutput(context.Background(), agentRunID, stdout, stderr)
 		},
 	}
-	args := []string{
-		"-p", prompt,
-		"-m", "grok-build",
-		"--cwd", project.WorkingDirectory,
-		"--sandbox", "workspace",
-		"--always-approve",
-		"--output-format", "json",
-		"--no-auto-update",
-	}
-	cmd := osexec.CommandContext(ctx, grokBin, args...)
-	cmd.Stdout = output.stdoutWriter()
-	cmd.Stderr = output.stderrWriter()
-	cmd.Env = append(os.Environ(),
-		"RIPPLE_BASE_URL="+baseURL,
-		"RIPPLE_STORY_ID="+story.ID,
-		"TASKMANAGER_BASE_URL="+baseURL,
-		"TASKMANAGER_STORY_ID="+story.ID,
-	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	err = cmd.Start()
-	if err == nil {
-		done := make(chan error, 1)
-		go func() {
-			done <- cmd.Wait()
-		}()
-		select {
-		case err = <-done:
-		case <-ctx.Done():
-			if cmd.Process != nil {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
-			err = <-done
-		}
-	}
+	result, err := runner.Run(ctx, AgentRunRequest{
+		Role:       AgentRunRoleReview,
+		Prompt:     prompt,
+		WorkingDir: project.WorkingDirectory,
+		BaseURL:    baseURL,
+		StoryID:    story.ID,
+		Stdout:     output.stdoutWriter(),
+		Stderr:     output.stderrWriter(),
+	})
 	output.flushNow()
-	stdoutText, stderrText := output.snapshot()
+	stdoutText, stderrText := result.Stdout, result.Stderr
+	if stdoutText == "" && stderrText == "" {
+		stdoutText, stderrText = output.snapshot()
+	}
 	if err != nil {
 		detail := stderrText
 		if detail == "" {
@@ -609,16 +791,23 @@ func (a *App) runGrokHeadless(ctx context.Context, queueRunID int64, baseURL str
 			status = "stopped"
 			err = context.Canceled
 		}
-		_ = a.finishAgentStoryRun(context.Background(), agentRunID, status, stdoutText, stderrText, "", err)
+		// Ensure secrets never land in stored error text.
+		safeErr := a.redactKnownSecrets(err)
+		_ = a.finishAgentStoryRun(context.Background(), agentRunID, status, stdoutText, stderrText, "", safeErr)
 		if detail != "" {
-			return "", fmt.Errorf("%w: %s", err, truncate(detail, 800))
+			return "", fmt.Errorf("%w: %s", safeErr, truncate(detail, 800))
 		}
-		return "", err
+		return "", safeErr
 	}
-	text, err := extractGrokJSONText(stdoutText)
-	if err != nil {
-		_ = a.finishAgentStoryRun(context.Background(), agentRunID, "failed", stdoutText, stderrText, "", err)
-		return "", err
+	text := strings.TrimSpace(result.FinalMessage)
+	if text == "" {
+		// Grok CLI path may leave message only after extract; prefer final.
+		var extractErr error
+		text, extractErr = extractGrokJSONText(stdoutText)
+		if extractErr != nil {
+			_ = a.finishAgentStoryRun(context.Background(), agentRunID, "failed", stdoutText, stderrText, "", extractErr)
+			return "", extractErr
+		}
 	}
 	_ = a.finishAgentStoryRun(context.Background(), agentRunID, "completed", stdoutText, stderrText, text, nil)
 	return text, nil
@@ -667,10 +856,10 @@ func (a *App) upsertStoryPipeline(ctx context.Context, pipeline StoryPipeline) e
 	return err
 }
 
-func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previousSummary string) (string, error) {
+func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previousSummary string) (pipelineResult, error) {
 	ghBin, err := resolveGhBinary()
 	if err != nil {
-		return "", err
+		return pipelineResult{}, err
 	}
 	dir := pc.Project.WorkingDirectory
 	pipeline := StoryPipeline{
@@ -681,13 +870,13 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	a.updateAgentProgress(pc.Story.ID, fmt.Sprintf("Preflight %s", pc.Story.ID), 0, 0)
 	pipeline.Phase = PipelinePhasePreflight
 	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
-		return "", err
+		return pipelineResult{}, err
 	}
 	defaultBranch, err := gitPreflight(ctx, dir)
 	if err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
 	pc.DefaultBranch = defaultBranch
 	pipeline.DefaultBranch = defaultBranch
@@ -697,17 +886,17 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	pipeline.Branch = branch
 	pipeline.Phase = PipelinePhaseBranching
 	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
-		return "", err
+		return pipelineResult{}, err
 	}
 	if err := gitCreateFeatureBranch(ctx, dir, defaultBranch, branch); err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
 
 	docs, err := embeddedFiles.ReadFile("docs/bot-api.md")
 	if err != nil {
-		return "", err
+		return pipelineResult{}, err
 	}
 	pipeline.Phase = PipelinePhaseImplement
 	_ = a.upsertStoryPipeline(ctx, pipeline)
@@ -716,7 +905,7 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	if err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
 
 	pipeline.Phase = PipelinePhasePush
@@ -724,24 +913,24 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	if err := gitCommitAll(ctx, dir, fmt.Sprintf("%s: %s", pc.Story.ID, pc.Story.Title)); err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
 	ahead, err := gitBranchAheadCount(ctx, dir, defaultBranch, branch)
 	if err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
 	if ahead == 0 {
 		err := errors.New("implementation produced no commits on the feature branch")
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
 	if err := gitPushBranch(ctx, dir, branch); err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
 
 	pipeline.Phase = PipelinePhaseCreatePR
@@ -752,7 +941,7 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	if err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
 	pc.PRNumber = prNumber
 	pc.PRURL = prURL
@@ -765,20 +954,20 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	if err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
-	reviewPrompt := buildGrokReviewPrompt(pc.Story, prNumber, prURL, diff)
-	reviewText, err := a.runGrokHeadless(ctx, pc.QueueRunID, pc.BaseURL, pc.Project, pc.Story, reviewPrompt, RunKindGrokReview)
+	reviewPrompt := buildAgentReviewPrompt(pc.Story, prNumber, prURL, diff)
+	reviewText, err := a.runReviewerForStory(ctx, pc.QueueRunID, pc.BaseURL, pc.Project, pc.Story, reviewPrompt, RunKindGrokReview)
 	if err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
-	review, err := parseGrokReview(reviewText)
+	review, err := parseAgentReview(reviewText)
 	if err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
 	reviewJSON, _ := json.Marshal(review)
 	pipeline.ReviewJSON = string(reviewJSON)
@@ -786,7 +975,12 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	if err := ghPRComment(ctx, ghBin, dir, prNumber, formatReviewForPR(review)); err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
+	}
+
+	// Supervised projects stop after PR + agent review. No auto-fix, quality gate, or merge.
+	if normalizeAutonomyMode(pc.Project.AutonomyMode) == AutonomySupervised {
+		return a.pausePipelineForHuman(ctx, pc, pipeline, finalMessage)
 	}
 
 	if reviewNeedsFix(review) {
@@ -796,17 +990,17 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 		if _, err := a.runCodexForStoryWithKind(ctx, pc.QueueRunID, pc.BaseURL, pc.Project, pc.Story, fixPrompt, RunKindCodexFix, branch, prNumber, prURL); err != nil {
 			pipeline.Error = err.Error()
 			_ = a.upsertStoryPipeline(ctx, pipeline)
-			return "", err
+			return pipelineResult{}, err
 		}
 		if err := gitCommitAll(ctx, dir, fmt.Sprintf("%s: address review feedback", pc.Story.ID)); err != nil {
 			pipeline.Error = err.Error()
 			_ = a.upsertStoryPipeline(ctx, pipeline)
-			return "", err
+			return pipelineResult{}, err
 		}
 		if err := gitPushBranch(ctx, dir, branch); err != nil {
 			pipeline.Error = err.Error()
 			_ = a.upsertStoryPipeline(ctx, pipeline)
-			return "", err
+			return pipelineResult{}, err
 		}
 	}
 
@@ -815,7 +1009,7 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	if err := runQualityGate(ctx, dir); err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
 
 	pipeline.Phase = PipelinePhaseMerge
@@ -823,7 +1017,7 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	if err := ghPRMerge(ctx, ghBin, dir, prNumber); err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		return "", err
+		return pipelineResult{}, err
 	}
 	_ = gitCheckoutBranch(ctx, dir, defaultBranch)
 	_ = gitDeleteLocalBranch(ctx, dir, branch, defaultBranch)
@@ -831,7 +1025,396 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	pipeline.Phase = PipelinePhaseCompleted
 	pipeline.Error = ""
 	_ = a.upsertStoryPipeline(ctx, pipeline)
-	return finalMessage, nil
+	return pipelineResult{FinalMessage: finalMessage}, nil
+}
+
+// pausePipelineForHuman stops a supervised delivery loop after agent review is posted.
+// The story becomes in_review; the queue item is marked awaiting_human by the runner.
+func (a *App) pausePipelineForHuman(ctx context.Context, pc pipelineContext, pipeline StoryPipeline, finalMessage string) (pipelineResult, error) {
+	pipeline.Phase = PipelinePhaseAwaitingHuman
+	pipeline.Error = ""
+	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
+		return pipelineResult{}, err
+	}
+	if err := a.changeStoryStatus(ctx, pc.Story.ID, StatusInReview, false, "Awaiting human after agent review"); err != nil {
+		return pipelineResult{}, err
+	}
+	eventMsg := "PR opened and agent review posted; waiting for human action"
+	if strings.TrimSpace(pipeline.PRURL) != "" {
+		eventMsg = fmt.Sprintf("PR opened and agent review posted; waiting for human action. %s", pipeline.PRURL)
+	}
+	if err := a.addEvent(ctx, pc.Story.ID, eventAwaitingHumanReview, eventMsg); err != nil {
+		return pipelineResult{}, err
+	}
+	return pipelineResult{FinalMessage: finalMessage, AwaitingHuman: true}, nil
+}
+
+func (a *App) getStoryPipeline(ctx context.Context, queueRunID int64, storyID string) (StoryPipeline, error) {
+	row := a.db.QueryRowContext(ctx, `SELECT id, queue_run_id, story_id, phase, branch, default_branch, pr_number, pr_url, review_json, error
+		FROM story_pipelines WHERE queue_run_id = ? AND story_id = ?`, queueRunID, storyID)
+	var p StoryPipeline
+	if err := row.Scan(&p.ID, &p.QueueRunID, &p.StoryID, &p.Phase, &p.Branch, &p.DefaultBranch, &p.PRNumber, &p.PRURL, &p.ReviewJSON, &p.Error); err != nil {
+		return StoryPipeline{}, err
+	}
+	return p, nil
+}
+
+func (a *App) getLatestStoryPipeline(ctx context.Context, storyID string) (StoryPipeline, error) {
+	row := a.db.QueryRowContext(ctx, `SELECT id, queue_run_id, story_id, phase, branch, default_branch, pr_number, pr_url, review_json, error
+		FROM story_pipelines WHERE story_id = ? ORDER BY id DESC LIMIT 1`, storyID)
+	var p StoryPipeline
+	if err := row.Scan(&p.ID, &p.QueueRunID, &p.StoryID, &p.Phase, &p.Branch, &p.DefaultBranch, &p.PRNumber, &p.PRURL, &p.ReviewJSON, &p.Error); err != nil {
+		return StoryPipeline{}, err
+	}
+	return p, nil
+}
+
+// prepareAddressFeedback validates a supervised story and collects PR comments without starting an agent.
+func (a *App) prepareAddressFeedback(ctx context.Context, storyID string) (Story, Project, StoryPipeline, PRFeedback, error) {
+	story, err := a.getStory(ctx, storyID)
+	if err != nil {
+		return Story{}, Project{}, StoryPipeline{}, PRFeedback{}, err
+	}
+	if story.Status != StatusInReview {
+		return Story{}, Project{}, StoryPipeline{}, PRFeedback{}, badRequest("Only stories in review can act on review comments")
+	}
+	project, err := a.getProject(ctx, story.ProjectID)
+	if err != nil {
+		return Story{}, Project{}, StoryPipeline{}, PRFeedback{}, err
+	}
+	if strings.TrimSpace(project.WorkingDirectory) == "" {
+		return Story{}, Project{}, StoryPipeline{}, PRFeedback{}, badRequest("Set the project working directory before addressing feedback")
+	}
+	pipeline, err := a.getLatestStoryPipeline(ctx, story.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Story{}, Project{}, StoryPipeline{}, PRFeedback{}, badRequest("No pipeline/PR found for this story. Run the supervised queue first.")
+		}
+		return Story{}, Project{}, StoryPipeline{}, PRFeedback{}, err
+	}
+	if pipeline.PRNumber <= 0 || strings.TrimSpace(pipeline.PRURL) == "" {
+		return Story{}, Project{}, StoryPipeline{}, PRFeedback{}, badRequest("This story does not have a pull request to collect comments from")
+	}
+	if strings.TrimSpace(pipeline.Branch) == "" {
+		return Story{}, Project{}, StoryPipeline{}, PRFeedback{}, badRequest("This story is missing its feature branch on the pipeline record")
+	}
+
+	ghBin, err := resolveGhBinary()
+	if err != nil {
+		return Story{}, Project{}, StoryPipeline{}, PRFeedback{}, err
+	}
+	feedback, err := ghCollectPRFeedback(ctx, ghBin, project.WorkingDirectory, pipeline.PRNumber, pipeline.ReviewJSON)
+	if err != nil {
+		return Story{}, Project{}, StoryPipeline{}, PRFeedback{}, err
+	}
+	events, err := a.listEvents(ctx, story.ID)
+	if err != nil {
+		return Story{}, Project{}, StoryPipeline{}, PRFeedback{}, err
+	}
+	if err := evaluateAddressFeedback(feedback, events); err != nil {
+		return Story{}, Project{}, StoryPipeline{}, PRFeedback{}, err
+	}
+	return story, project, pipeline, feedback, nil
+}
+
+// runAddressFeedback performs a supervised fix pass: agent edits, optional commit/push, back to in_review.
+// No quality gate (locked D1). Caller must hold the global agent activity slot.
+func (a *App) runAddressFeedback(ctx context.Context, baseURL string, story Story, project Project, pipeline StoryPipeline, feedback PRFeedback) error {
+	if err := a.changeStoryStatus(ctx, story.ID, StatusInProgress, false, "Addressing review comments"); err != nil {
+		return err
+	}
+	pipeline.Phase = PipelinePhaseAddressFeedback
+	pipeline.Error = ""
+	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
+		return err
+	}
+	if err := a.addEvent(ctx, story.ID, eventAddressingFeedback, fmt.Sprintf("Acting on review comments for PR #%d", pipeline.PRNumber)); err != nil {
+		return err
+	}
+	a.publishAgentEvent("board")
+	a.updateAgentProgress(story.ID, fmt.Sprintf("Addressing feedback for %s", story.ID), 0, 1)
+
+	dir := project.WorkingDirectory
+	if err := gitCheckoutBranch(ctx, dir, pipeline.Branch); err != nil {
+		pipeline.Error = err.Error()
+		_ = a.upsertStoryPipeline(ctx, pipeline)
+		_ = a.changeStoryStatus(ctx, story.ID, StatusInReview, false, "Returned to review after address-feedback error")
+		return err
+	}
+
+	docs, err := embeddedFiles.ReadFile("docs/bot-api.md")
+	if err != nil {
+		_ = a.changeStoryStatus(ctx, story.ID, StatusInReview, false, "Returned to review after address-feedback error")
+		return err
+	}
+	prompt := buildCodexAddressFeedbackPrompt(baseURL, string(docs), project, story, pipeline.Branch, pipeline.PRNumber, pipeline.PRURL, feedback)
+	finalMessage, err := a.runCodexForStoryWithKind(ctx, pipeline.QueueRunID, baseURL, project, story, prompt, RunKindCodexAddressFeedback, pipeline.Branch, pipeline.PRNumber, pipeline.PRURL)
+	if err != nil {
+		pipeline.Error = err.Error()
+		_ = a.upsertStoryPipeline(ctx, pipeline)
+		_ = a.changeStoryStatus(ctx, story.ID, StatusInReview, false, "Returned to review after address-feedback error")
+		_ = a.addEvent(ctx, story.ID, "agent_failed", "Address feedback failed: "+err.Error())
+		return err
+	}
+
+	dirty, err := gitWorkingTreeDirty(ctx, dir)
+	if err != nil {
+		pipeline.Error = err.Error()
+		_ = a.upsertStoryPipeline(ctx, pipeline)
+		_ = a.changeStoryStatus(ctx, story.ID, StatusInReview, false, "Returned to review after address-feedback error")
+		return err
+	}
+	committed := false
+	if dirty {
+		if err := gitCommitAll(ctx, dir, fmt.Sprintf("%s: address review comments", story.ID)); err != nil {
+			pipeline.Error = err.Error()
+			_ = a.upsertStoryPipeline(ctx, pipeline)
+			_ = a.changeStoryStatus(ctx, story.ID, StatusInReview, false, "Returned to review after address-feedback error")
+			return err
+		}
+		committed = true
+		if err := gitPushBranch(ctx, dir, pipeline.Branch); err != nil {
+			pipeline.Error = err.Error()
+			_ = a.upsertStoryPipeline(ctx, pipeline)
+			_ = a.changeStoryStatus(ctx, story.ID, StatusInReview, false, "Returned to review after address-feedback error")
+			return err
+		}
+	}
+
+	return a.completeAddressFeedback(ctx, story, pipeline, feedback, committed, finalMessage)
+}
+
+func (a *App) completeAddressFeedback(ctx context.Context, story Story, pipeline StoryPipeline, feedback PRFeedback, committed bool, finalMessage string) error {
+	pipeline.Phase = PipelinePhaseAwaitingHuman
+	pipeline.Error = ""
+	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
+		return err
+	}
+	if err := a.changeStoryStatus(ctx, story.ID, StatusInReview, false, "Awaiting human after addressing feedback"); err != nil {
+		return err
+	}
+	fp := feedbackFingerprint(feedback)
+	if committed {
+		msg := "Review comments addressed and pushed; waiting for human again. " + feedbackFingerprintPrefix + fp
+		if strings.TrimSpace(finalMessage) != "" {
+			msg = truncate(finalMessage, 240) + " · " + feedbackFingerprintPrefix + fp
+		}
+		if err := a.addEvent(ctx, story.ID, eventFeedbackAddressed, msg); err != nil {
+			return err
+		}
+	} else {
+		msg := "Agent ran but produced no code changes; waiting for human again. " + feedbackFingerprintPrefix + fp
+		if err := a.addEvent(ctx, story.ID, eventFeedbackNoChanges, msg); err != nil {
+			return err
+		}
+	}
+	a.publishAgentEvent("board")
+	return nil
+}
+
+// Test hooks for human merge (production defaults; overridden in tests).
+var (
+	humanMergeQualityGate = runQualityGate
+	humanMergePR          = ghPRMerge
+)
+
+const eventMergedByHuman = "merged_by_human"
+const eventMergedExternally = "merged_externally"
+const eventQualityGateFailed = "quality_gate_failed"
+
+// Test hook for external PR merge detection (production default; overridden in tests).
+var checkPRMerged = ghPRIsMerged
+
+// prepareHumanMerge validates a supervised story is ready for human merge.
+func (a *App) prepareHumanMerge(ctx context.Context, storyID string) (Story, Project, StoryPipeline, error) {
+	story, err := a.getStory(ctx, storyID)
+	if err != nil {
+		return Story{}, Project{}, StoryPipeline{}, err
+	}
+	if story.Status != StatusInReview {
+		return Story{}, Project{}, StoryPipeline{}, badRequest("Only stories in review can be merged from Ripple")
+	}
+	project, err := a.getProject(ctx, story.ProjectID)
+	if err != nil {
+		return Story{}, Project{}, StoryPipeline{}, err
+	}
+	if strings.TrimSpace(project.WorkingDirectory) == "" {
+		return Story{}, Project{}, StoryPipeline{}, badRequest("Set the project working directory before merging")
+	}
+	pipeline, err := a.getLatestStoryPipeline(ctx, story.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Story{}, Project{}, StoryPipeline{}, badRequest("No pipeline/PR found for this story. Run the supervised queue first.")
+		}
+		return Story{}, Project{}, StoryPipeline{}, err
+	}
+	if pipeline.PRNumber <= 0 {
+		return Story{}, Project{}, StoryPipeline{}, badRequest("This story does not have a pull request to merge")
+	}
+	return story, project, pipeline, nil
+}
+
+// executeHumanMerge runs the quality gate, merges the PR, cleans up the local branch, and marks the story done.
+// Quality gate is required (locked D1). On gate or merge failure the story stays in_review.
+func (a *App) executeHumanMerge(ctx context.Context, story Story, project Project, pipeline StoryPipeline) error {
+	dir := project.WorkingDirectory
+	ghBin, err := resolveGhBinary()
+	if err != nil {
+		return err
+	}
+
+	defaultBranch := strings.TrimSpace(pipeline.DefaultBranch)
+	if defaultBranch == "" {
+		defaultBranch, err = detectDefaultBranch(ctx, dir)
+		if err != nil {
+			return err
+		}
+		pipeline.DefaultBranch = defaultBranch
+	}
+
+	if strings.TrimSpace(pipeline.Branch) != "" {
+		if err := gitCheckoutBranch(ctx, dir, pipeline.Branch); err != nil {
+			// Best-effort: quality gate can still run on whatever is checked out if branch is gone.
+			// Prefer failing clearly so humans fix the workspace.
+			return fmt.Errorf("checkout feature branch %s: %w", pipeline.Branch, err)
+		}
+	}
+
+	a.updateAgentProgress(story.ID, fmt.Sprintf("Quality gate for %s", story.ID), 0, 1)
+	pipeline.Phase = PipelinePhaseQualityGate
+	pipeline.Error = ""
+	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
+		return err
+	}
+	if err := humanMergeQualityGate(ctx, dir); err != nil {
+		pipeline.Error = err.Error()
+		pipeline.Phase = PipelinePhaseAwaitingHuman
+		_ = a.upsertStoryPipeline(ctx, pipeline)
+		_ = a.addEvent(ctx, story.ID, eventQualityGateFailed, "Quality gate failed before merge: "+err.Error())
+		a.publishAgentEvent("board")
+		return badRequest("Quality gate failed; story stays in review. " + truncate(err.Error(), 400))
+	}
+
+	a.updateAgentProgress(story.ID, fmt.Sprintf("Merging PR for %s", story.ID), 0, 1)
+	pipeline.Phase = PipelinePhaseMerge
+	pipeline.Error = ""
+	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
+		return err
+	}
+	if err := humanMergePR(ctx, ghBin, dir, pipeline.PRNumber); err != nil {
+		pipeline.Error = err.Error()
+		pipeline.Phase = PipelinePhaseAwaitingHuman
+		_ = a.upsertStoryPipeline(ctx, pipeline)
+		_ = a.addEvent(ctx, story.ID, "merge_failed", "Merge failed: "+err.Error())
+		a.publishAgentEvent("board")
+		return badRequest("Merge failed; story stays in review. " + truncate(err.Error(), 400))
+	}
+
+	if strings.TrimSpace(pipeline.Branch) != "" {
+		_ = gitCheckoutBranch(ctx, dir, defaultBranch)
+		_ = gitDeleteLocalBranch(ctx, dir, pipeline.Branch, defaultBranch)
+	} else {
+		_ = gitCheckoutBranch(ctx, dir, defaultBranch)
+	}
+
+	return a.completeHumanMerge(ctx, story, pipeline)
+}
+
+func (a *App) completeHumanMerge(ctx context.Context, story Story, pipeline StoryPipeline) error {
+	msg := "Pull request merged by human; story marked done"
+	if pipeline.PRNumber > 0 {
+		msg = fmt.Sprintf("PR #%d merged by human; story marked done", pipeline.PRNumber)
+		if strings.TrimSpace(pipeline.PRURL) != "" {
+			msg += ". " + pipeline.PRURL
+		}
+	}
+	return a.finalizeMergedStory(ctx, story, pipeline, eventMergedByHuman, "Merged by human", msg)
+}
+
+// syncExternalPRMerge marks an in_review story done when its PR was already merged outside Ripple.
+// Explicit user control only (locked §2.7) — does not rewrite status on page load.
+func (a *App) syncExternalPRMerge(ctx context.Context, storyID string) error {
+	story, err := a.getStory(ctx, storyID)
+	if err != nil {
+		return err
+	}
+	if story.Status != StatusInReview {
+		return badRequest("Only stories in review can sync PR status")
+	}
+	project, err := a.getProject(ctx, story.ProjectID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(project.WorkingDirectory) == "" {
+		return badRequest("Set the project working directory before syncing PR status")
+	}
+	pipeline, err := a.getLatestStoryPipeline(ctx, story.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return badRequest("No pipeline/PR found for this story. Run the supervised queue first.")
+		}
+		return err
+	}
+	if pipeline.PRNumber <= 0 {
+		return badRequest("This story does not have a pull request to sync")
+	}
+
+	ghBin, err := resolveGhBinary()
+	if err != nil {
+		return err
+	}
+	merged, err := checkPRMerged(ctx, ghBin, project.WorkingDirectory, pipeline.PRNumber)
+	if err != nil {
+		return err
+	}
+	if !merged {
+		return badRequest("Pull request is not merged on GitHub yet. Merge it there, or use Merge pull request in Ripple.")
+	}
+
+	// Best-effort local cleanup after external merge (same as supervised merge).
+	defaultBranch := strings.TrimSpace(pipeline.DefaultBranch)
+	if defaultBranch == "" {
+		if db, dbErr := detectDefaultBranch(ctx, project.WorkingDirectory); dbErr == nil {
+			defaultBranch = db
+			pipeline.DefaultBranch = defaultBranch
+		}
+	}
+	if defaultBranch != "" {
+		_ = gitCheckoutBranch(ctx, project.WorkingDirectory, defaultBranch)
+		if strings.TrimSpace(pipeline.Branch) != "" {
+			_ = gitDeleteLocalBranch(ctx, project.WorkingDirectory, pipeline.Branch, defaultBranch)
+		}
+	}
+
+	msg := "Pull request was already merged on GitHub; story marked done"
+	if pipeline.PRNumber > 0 {
+		msg = fmt.Sprintf("PR #%d was already merged on GitHub; story marked done", pipeline.PRNumber)
+		if strings.TrimSpace(pipeline.PRURL) != "" {
+			msg += ". " + pipeline.PRURL
+		}
+	}
+	return a.finalizeMergedStory(ctx, story, pipeline, eventMergedExternally, "Synced after external merge", msg)
+}
+
+// finalizeMergedStory marks pipeline completed, story done, records the merge event, and updates the queue item.
+func (a *App) finalizeMergedStory(ctx context.Context, story Story, pipeline StoryPipeline, eventType, statusMessage, eventMsg string) error {
+	pipeline.Phase = PipelinePhaseCompleted
+	pipeline.Error = ""
+	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
+		return err
+	}
+	if err := a.changeStoryStatus(ctx, story.ID, StatusDone, false, statusMessage); err != nil {
+		return err
+	}
+	if err := a.addEvent(ctx, story.ID, eventType, eventMsg); err != nil {
+		return err
+	}
+	// Best-effort: if this story is still awaiting_human on its queue run, mark completed.
+	if pipeline.QueueRunID > 0 {
+		_ = a.updateQueueRunItemStatus(ctx, pipeline.QueueRunID, story.ID, QueueItemCompleted)
+	}
+	a.publishAgentEvent("board")
+	return nil
 }
 
 func timeNowUTC() time.Time {
