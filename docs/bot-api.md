@@ -23,11 +23,23 @@ GET /api/openapi.yaml
 - An epic is optional.
 - Story descriptions are Markdown.
 - Intended flow is `backlog -> queued -> in_progress -> in_review -> done` (autonomous runs may skip visible `in_review` and go straight to `done` after merge).
+- **`done` always means the pull request was merged.** Never mark done solely because a PR was opened.
 - Bots may only set story status to `backlog`, `in_progress`, or `done`.
 - `queued` and `in_review` are human/orchestrator-only. Bots must not set them.
 - Bots must not close stories. Closing is a manual human review action in the UI.
 - If a user says work is complete, move the story to `done`, not `closed`.
 - Closed stories are hidden from the default board and default story list.
+
+### Status meanings
+
+| Status | Who sets it | Meaning |
+|--------|-------------|---------|
+| `backlog` | human or bot | Not queued |
+| `queued` | human only | In the execution queue |
+| `in_progress` | human, bot, or orchestrator | Active implementation or fix pass |
+| `in_review` | orchestrator / human only | PR open; waiting on a human (supervised) |
+| `done` | human, bot, or orchestrator | Merged |
+| `closed` | human only | Archived after human review |
 
 ## Human-Friendly IDs
 
@@ -48,6 +60,10 @@ Optional delivery fields (all have safe defaults that preserve current behavior)
 | `qualityGateMode` | `strict` | `strict` fails the run/merge on check errors; `warn` logs and continues |
 | `deleteBranchOnMerge` | `true` | Delete the feature branch on GitHub and locally after merge |
 | `branchNameTemplate` | `ripple/{id}-{slug}` | Feature branch name; placeholders `{id}`, `{slug}`, `{prefix}` (must include `{id}`) |
+
+### Global agent settings (UI only)
+
+Implementer and Reviewer bindings live on the **Settings** page (app-wide, not per project). The Bot API does not configure agents. Defaults: Codex CLI implements; Grok CLI reviews. An OpenAI-compatible HTTP provider may be selected as Reviewer only.
 
 ## Create a Project
 

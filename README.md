@@ -12,13 +12,13 @@ A local-first task manager and agent orchestrator. Humans shape the backlog. Age
 [![GitHub stars](https://img.shields.io/github/stars/adamaoc/ripple?style=flat)](https://github.com/adamaoc/ripple/stargazers)
 [![License](https://img.shields.io/badge/license-MIT-315f9d)](LICENSE)
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [API](#api-first-by-design) · [Contributing](#contributing)
+[Quick start](#quick-start) · [How it works](#how-it-works) · [Autonomy](#autonomy-modes) · [Agents](#agent-settings) · [API](#api-first-by-design) · [Contributing](#contributing)
 
 </div>
 
 ![Ripple workspace dashboard](.github/assets/dashboard.jpg)
 
-<div align="center"><sub>One local workspace for project health, backlogs, and autonomous agent runs.</sub></div>
+<div align="center"><sub>One local workspace for project health, backlogs, and agent delivery runs.</sub></div>
 
 ## Stop babysitting the agent
 
@@ -35,15 +35,16 @@ Every agent message, command, warning, review, and outcome stays visible in a st
 
 ## Features
 
-- **Autonomous queue runs** — Execute an ordered set of stories from one action.
-- **Built-in review loop** — Codex implements and Grok independently reviews each pull request.
-- **Real delivery workflow** — Feature branches, commits, pull requests, review comments, quality gates, and merges are orchestrated for you.
+- **Autonomous or supervised delivery** — Per-project: fully auto-merge, or stop at PR review for a human.
+- **Configurable agents** — Settings binds an Implementer (CLI) and Reviewer (CLI or OpenAI-compatible API).
+- **Built-in review loop** — Independent PR review before merge; one auto fix pass in autonomous mode.
+- **Real delivery workflow** — Feature branches, commits, PRs, review comments, quality gates, and merges.
 - **Human-controlled planning** — People decide what enters the queue and when completed work is closed.
-- **Durable agent context** — Markdown stories, event history, epics, and prior-run summaries survive individual chat sessions.
-- **Live, honest transcripts** — Follow agent activity in real time, with raw output retained for deeper inspection.
-- **Multi-project workspace** — Point projects at separate local Git repositories and manage them from one place.
-- **API-first task management** — Agents can discover the workflow and manage work through JSON and OpenAPI endpoints.
-- **Local-first by default** — One Go process, embedded UI, and a SQLite database you own.
+- **Durable agent context** — Markdown stories, event history, epics, and prior-run summaries survive chat sessions.
+- **Live, honest transcripts** — Follow agent activity in real time, with raw output retained for inspection.
+- **Workspace setup checks** — Verify path, git, GitHub remote, and tool readiness before you run.
+- **API-first task management** — Agents discover the workflow through JSON and OpenAPI endpoints.
+- **Local-first by default** — One Go process, embedded UI, SQLite database you own.
 - **Focused interface** — Responsive light and dark themes with no frontend build step.
 
 ## Product tour
@@ -71,20 +72,70 @@ Every agent message, command, warning, review, and outcome stays visible in a st
 
 Ripple separates human decisions from agent execution:
 
-1. **Shape the backlog.** Create or enrich stories through the API, then review their Markdown descriptions in the UI.
-2. **Build the queue.** Select stories and place them in the exact order they should run.
-3. **Start once.** Ripple snapshots the queue and processes each story on its own feature branch.
-4. **Review automatically.** Grok reviews the pull-request diff. Actionable feedback triggers one Codex fix pass.
-5. **Enforce quality.** Available test, lint, typecheck, and build scripts must pass before merge.
-6. **Inspect the result.** The run workspace preserves the complete transcript, review summary, pull request, and outcome.
+1. **Create a project.** Use the dashboard form or the API. Point `workingDirectory` at a local Git repo (or clone from GitHub in project settings).
+2. **Shape the backlog.** Enrich Markdown stories; set autonomy and delivery options on the project.
+3. **Build the queue.** Select stories and place them in the exact order they should run.
+4. **Verify setup.** Use **Verify setup** in project settings when something looks wrong.
+5. **Start a run.** Ripple freezes the queue and processes each story on its own feature branch.
+6. **Review.** The configured Reviewer inspects the PR. Autonomous mode may auto-fix once; supervised mode waits for you.
+7. **Merge.** Quality gate runs, then the PR is merged (automatically or by you). **Done always means merged.**
 
-The story lifecycle stays simple:
+### Story lifecycle
 
 ```text
-backlog → queued → in_progress → done → closed
+backlog → queued → in_progress → in_review → done → closed
 ```
 
-Agents work within `backlog`, `in_progress`, and `done`. Queueing and closing remain human decisions.
+| Status | Meaning |
+| --- | --- |
+| `backlog` | Not queued |
+| `queued` | Human ordered the story into a run |
+| `in_progress` | Agent is implementing or addressing feedback |
+| `in_review` | PR open; ball is with the human (supervised) |
+| `done` | Pull request merged |
+| `closed` | Human archived the story after review |
+
+- **Agents** may set only `backlog`, `in_progress`, and `done` via the API.
+- **`queued`**, **`in_review`**, and **`closed`** are human/orchestrator-only.
+- Autonomous runs may never show `in_review` in the UI; they go to `done` after merge.
+
+## Autonomy modes
+
+Each project chooses how far automation may go:
+
+| Mode | Behavior |
+| --- | --- |
+| **Autonomous** (default) | Implement → PR → agent review → optional one fix pass → quality gate → merge → `done` |
+| **Supervised** | Implement → PR → agent review → stop at `in_review`. You act on comments, merge (with quality gate), or **Sync PR status** if you already merged on GitHub |
+
+While a story is `in_review`, the queue continues with later stories so human latency does not block the run.
+
+On supervised stories in the story panel:
+
+- **Act on review comments** — Agent applies PR feedback and pushes (no quality gate on this step)
+- **Merge pull request** — Quality gate, then merge, then `done`
+- **Sync PR status** — If you merged on GitHub already, mark the story done
+
+## Agent settings
+
+Open **Settings → Agents** for app-wide tooling (not per project).
+
+| Role | Who can fill it |
+| --- | --- |
+| **Implementer** | CLI only (Codex CLI today) — writes code and applies fix passes |
+| **Reviewer** | Grok CLI **or** an OpenAI-compatible HTTP API provider |
+
+Path precedence for CLI binaries:
+
+```text
+env override (RIPPLE_CODEX_BIN / RIPPLE_GROK_BIN) > Settings path > auto-detect
+```
+
+### API reviewers
+
+Under **Settings → API providers** you can add an OpenAI-compatible chat/completions host (base URL, model, API key). Select it as Reviewer. Keys are stored in the local SQLite database, masked in the UI, and never written into run transcripts.
+
+**v1 constraint:** API providers cannot be Implementers (they cannot edit files natively).
 
 ## Quick start
 
@@ -105,7 +156,9 @@ Open [http://localhost:8080](http://localhost:8080). Ripple creates `ripple.db` 
 
 ### 2. Connect a project
 
-Create a project and its first story through the API. `workingDirectory` must point to a clean local Git repository with an accessible GitHub remote.
+**Option A — UI:** Dashboard → **Create project**, then open Project settings to set a path, verify setup, or clone from GitHub.
+
+**Option B — API:**
 
 ```bash
 curl -X POST http://localhost:8080/api/stories \
@@ -120,19 +173,21 @@ curl -X POST http://localhost:8080/api/stories \
   }'
 ```
 
-You can change the working directory later from the project backlog UI.
+`workingDirectory` should be a clean local Git repository with an accessible GitHub remote.
 
-### 3. Enable autonomous runs
+### 3. Enable agent runs
 
-Ripple currently uses three local command-line tools:
+Install and authenticate tools on the same machine as Ripple:
 
 | Tool | Role | Check |
 | --- | --- | --- |
-| [Codex CLI](https://developers.openai.com/codex/cli/) | Implementation and review fixes | `codex --version` |
-| [Grok CLI](https://docs.x.ai/build/overview) | Independent pull-request review | `grok --version` |
-| [GitHub CLI](https://cli.github.com/) | Pull requests, comments, and merges | `gh auth status` |
+| [Codex CLI](https://developers.openai.com/codex/cli/) | Implementer (default) | `codex --version` |
+| [Grok CLI](https://docs.x.ai/build/overview) | Reviewer (default) | `grok --version` |
+| [GitHub CLI](https://cli.github.com/) | PRs, comments, merges | `gh auth status` |
 
-The tools must be installed and authenticated on the same machine as Ripple. Once they are ready, queue stories from the backlog, open the run workspace, and select **Start run**.
+Optional: Settings → Agents for path overrides; Settings → API providers for an HTTP reviewer.
+
+Then queue stories from the backlog, open the run workspace, and select **Start run**.
 
 ## API-first by design
 
@@ -179,7 +234,7 @@ Ripple is designed to be easy to understand, run, and contribute to:
 | Persistence | Embedded SQLite |
 | UI | Server-rendered HTML templates + HTMX |
 | Styling | Plain CSS with light and dark themes |
-| Agent integration | Local CLI processes with structured output |
+| Agent integration | Local CLI processes + optional OpenAI-compatible HTTP reviewer |
 | API | JSON endpoints + embedded OpenAPI documentation |
 
 Templates, static assets, migrations, API docs, and the application are compiled into one Go binary. There is no Node runtime, asset pipeline, container, or external database required for Ripple itself.
@@ -188,9 +243,10 @@ Templates, static assets, migrations, API docs, and the application are compiled
 
 ```text
 main.go                 HTTP server, storage, API, UI, run transcript
-pipeline.go             Git, GitHub, Codex, Grok, review, and merge pipeline
-main_test.go            Application and API tests
-pipeline_test.go        Pipeline behavior tests
+pipeline.go             Git, GitHub, review, merge, supervised actions
+agents.go               AgentRunner interface, CLI + HTTP API runners
+agent_config.go         Global provider registry and role binding
+project_setup.go        Workspace setup checklist and clone helpers
 templates/              Server-rendered interface
 static/                 Styles and brand assets
 docs/bot-api.md         Agent-readable workflow guide
@@ -199,14 +255,14 @@ docs/openapi.yaml       Machine-readable API contract
 
 ## Configuration
 
-Flags override environment variables.
+Flags override environment variables. Settings UI paths sit between env and auto-detect for agent binaries.
 
 | Purpose | Flag | Environment variable | Default |
 | --- | --- | --- | --- |
 | Listen address | `-addr` | `RIPPLE_ADDR` | `:8080` |
 | SQLite database | `-db` | `RIPPLE_DB` | `ripple.db` |
-| Codex executable | — | `RIPPLE_CODEX_BIN` | Auto-detected |
-| Grok executable | — | `RIPPLE_GROK_BIN` | Auto-detected |
+| Codex executable | — | `RIPPLE_CODEX_BIN` | Auto-detected / Settings |
+| Grok executable | — | `RIPPLE_GROK_BIN` | Auto-detected / Settings |
 | GitHub CLI executable | — | `RIPPLE_GH_BIN` | `gh` from `PATH` |
 
 Examples:
@@ -237,7 +293,7 @@ go test ./...
 go vet ./...
 
 # Format Go sources
-gofmt -w main.go main_test.go pipeline.go pipeline_test.go
+gofmt -w *.go
 
 # Build everything
 go build ./...
@@ -245,17 +301,17 @@ go build ./...
 
 ## Security and scope
 
-Ripple is intended for a trusted local development environment. It currently has no user authentication or authorization layer, and autonomous runs execute local tools with access to configured project directories.
+Ripple is intended for a **trusted local development environment**. It has no user authentication or authorization layer. Queue runs execute local tools with access to configured project directories. API keys for reviewers are stored in SQLite **without at-rest encryption** (as protected as the machine and database file).
 
 Do not expose Ripple directly to the public internet. Review a story's scope before queueing it, keep project repositories clean, and inspect completed runs before treating the result as released software.
 
 Current intentional constraints:
 
-- One autonomous queue run executes at a time.
-- Projects and epics are created through the API; their work is managed in the UI.
+- One agent activity at a time (queue runs and manual “act on feedback” share a global lock).
+- Implementer is CLI-only; API integrations are reviewer-capable only.
 - Stories are archived by closing them rather than deleting history.
 - GitHub is the supported pull-request provider.
-- Codex and Grok are the supported implementation/review pair today.
+- Done means merged — never on PR open alone.
 
 ## Contributing
 
