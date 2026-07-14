@@ -5,11 +5,18 @@
     <h2>{{.Story.Title}}</h2>
     <p>{{.Story.ProjectName}}{{with .Story.EpicName}} / {{.}}{{end}}</p>
   </div>
-  <div class="detail-actions">
-    <form method="post" action="/stories/{{.Story.ID}}/close" data-current-redirect>
+  <div class="story-status-control">
+    <form method="post" action="/stories/{{.Story.ID}}/status" data-current-redirect>
       <input type="hidden" name="redirect">
-      <input name="closeComment" placeholder="Close comment">
-      <button type="submit">Close</button>
+      <label>Status
+        <select name="status" onchange="this.form.elements.redirect.value=location.pathname+location.search; this.form.submit()">
+          <option value="backlog" {{if eq .Story.Status "backlog"}}selected{{end}}>Backlog</option>
+          <option value="queued" {{if eq .Story.Status "queued"}}selected{{end}}>Queued</option>
+          <option value="in_progress" {{if eq .Story.Status "in_progress"}}selected{{end}}>In progress</option>
+          <option value="done" {{if eq .Story.Status "done"}}selected{{end}}>Done</option>
+          {{if eq .Story.Status "closed"}}<option value="closed" selected disabled>Closed</option>{{end}}
+        </select>
+      </label>
     </form>
   </div>
 </div>
@@ -35,4 +42,34 @@
   <p>No events yet.</p>
   {{end}}
 </section>
+
+{{if ne .Story.Status "closed"}}
+<section class="story-detail-section story-close-section">
+  <div>
+    <h3>Close story</h3>
+    <p>Remove this story from active work after it has been reviewed.</p>
+  </div>
+  <button type="button" class="danger-button" data-close-story-open>Close Story</button>
+</section>
+
+<div class="story-confirm-overlay" data-close-story-popup hidden>
+  <div class="story-confirm-popup" role="dialog" aria-modal="true" aria-labelledby="close-story-title">
+    <form method="post" action="/stories/{{.Story.ID}}/close" data-current-redirect>
+      <input type="hidden" name="redirect">
+      <div>
+        <span class="eyebrow">Confirm close</span>
+        <h3 id="close-story-title">Close {{.Story.ID}}?</h3>
+        <p>Add a comment explaining why this story is being closed.</p>
+      </div>
+      <label>Comment
+        <textarea name="closeComment" rows="4" placeholder="Add a closing comment" required></textarea>
+      </label>
+      <div class="story-confirm-actions">
+        <button type="button" class="secondary-button" data-close-story-cancel>Cancel</button>
+        <button type="submit" class="danger-button">Confirm close</button>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}
 {{end}}

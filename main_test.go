@@ -371,8 +371,13 @@ func TestBacklogFiltersAndStoryPanel(t *testing.T) {
 	}
 	res = httptest.NewRecorder()
 	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/stories/"+stories[0].ID+"/panel", nil))
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "Save description") || !strings.Contains(res.Body.String(), "Close") {
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "Save description") || !strings.Contains(res.Body.String(), "Close Story") {
 		t.Fatalf("story panel response was incorrect")
+	}
+	for _, marker := range []string{`name="status"`, `this.form.elements.redirect.value=location.pathname+location.search`, `data-close-story-popup`, `name="closeComment"`, `required`, "Confirm close", "Cancel"} {
+		if !strings.Contains(res.Body.String(), marker) {
+			t.Fatalf("story panel missing %q", marker)
+		}
 	}
 }
 

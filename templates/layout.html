@@ -94,6 +94,15 @@
     document.querySelector('[data-folder-picker-close]')?.addEventListener('click', () => folderModal?.close());
     modal?.addEventListener('click', (event) => { if (event.target === modal) modal.close(); });
     folderModal?.addEventListener('click', (event) => { if (event.target === folderModal) folderModal.close(); });
+    document.addEventListener('click', (event) => {
+      const popup = document.querySelector('[data-close-story-popup]');
+      if (event.target.closest('[data-close-story-open]')) {
+        popup?.removeAttribute('hidden');
+        popup?.querySelector('textarea')?.focus();
+      } else if (event.target.closest('[data-close-story-cancel]') || event.target === popup) {
+        popup?.setAttribute('hidden', '');
+      }
+    });
     if (modal?.dataset.hasStory === 'true') modal.showModal();
     document.addEventListener('submit', (event) => {
       const form = event.target.closest('form[data-current-redirect]');

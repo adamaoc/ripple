@@ -175,6 +175,7 @@ label { color: var(--muted); display: grid; font-size: 11px; font-weight: 700; g
 .queue-list li > div:nth-child(2) { min-width: 0; }
 .queue-list li strong, .queue-list li span { display: block; }
 .queue-list li > div:nth-child(2) > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-list li.empty-state { display: block; min-height: 0; overflow-wrap: normal; padding: 28px 18px !important; white-space: normal; }
 .queue-actions { display: flex; }
 .queue-actions form { display: flex; }
 .queue-actions button { border-right-width: 0; }
@@ -187,7 +188,8 @@ label { color: var(--muted); display: grid; font-size: 11px; font-weight: 700; g
 .modal-close { position: absolute; right: 12px; top: 12px; }
 .story-detail-header { align-items: start; border-bottom: 1px solid var(--line); display: flex; gap: 24px; justify-content: space-between; padding: 6px 45px 20px 0; }
 .story-detail-header h2 { font-size: 24px; line-height: 1.2; margin: 7px 0; }
-.detail-actions form { display: flex; gap: 7px; }
+.story-status-control { flex: 0 0 160px; }
+.story-status-control select { width: 100%; }
 .story-detail-section { border-bottom: 1px solid var(--line); padding: 20px 0; }
 .story-detail-section h3 { font-size: 12px; letter-spacing: .08em; margin: 0 0 12px; text-transform: uppercase; }
 .description form { display: grid; gap: 8px; margin-top: 16px; }
@@ -195,6 +197,17 @@ label { color: var(--muted); display: grid; font-size: 11px; font-weight: 700; g
 .event { border-top: 1px solid var(--line); display: grid; gap: 4px; grid-template-columns: 1fr auto; padding: 11px 0; }
 .event span { color: var(--muted); font: 11px monospace; }
 .event p { grid-column: 1 / -1; margin: 0; }
+.story-close-section { align-items: center; display: flex; gap: 24px; justify-content: space-between; }
+.story-close-section h3 { color: var(--danger); margin-bottom: 4px; }
+.story-close-section p { color: var(--muted); margin: 0; }
+.story-confirm-overlay { align-items: center; background: rgba(0,0,0,.52); display: flex; inset: 0; justify-content: center; padding: 20px; position: fixed; z-index: 20; }
+.story-confirm-overlay[hidden] { display: none; }
+.story-confirm-popup { background: var(--surface); border: 1px solid var(--line-strong); box-shadow: 0 18px 60px rgba(0,0,0,.3); max-width: 480px; padding: 22px; width: 100%; }
+.story-confirm-popup form { display: grid; gap: 18px; }
+.story-confirm-popup h3 { font-size: 20px; margin: 4px 0 6px; }
+.story-confirm-popup p { color: var(--muted); margin: 0; }
+.story-confirm-popup textarea { resize: vertical; }
+.story-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
 .folder-picker-modal { background: transparent; border: 0; max-height: 88vh; max-width: 760px; padding: 0; width: calc(100% - 32px); }
 .folder-picker-modal::backdrop { background: rgba(0,0,0,.58); }
@@ -430,7 +443,8 @@ label { color: var(--muted); display: grid; font-size: 11px; font-weight: 700; g
   .completion-stats { grid-template-columns: 1fr 1fr; }
   .completion-stats > div:nth-child(2) { border-right: 0; }
   .story-detail-header { flex-direction: column; }
-  .detail-actions form, .detail-actions input { width: 100%; }
+  .story-status-control { flex-basis: auto; width: 100%; }
+  .story-close-section { align-items: stretch; flex-direction: column; }
   .about-section { grid-template-columns: 1fr; padding: 21px 17px; }
   .about-steps li { grid-template-columns: 1fr; }
   .endpoint-list a { grid-template-columns: 1fr; gap: 4px; }
