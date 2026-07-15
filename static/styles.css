@@ -268,6 +268,37 @@ label.checkbox-label input { min-height: auto; width: auto; }
 .supervised-action-forms { display: grid; gap: 16px; }
 .supervised-action-form { display: grid; gap: 8px; justify-items: start; }
 .supervised-action-form .secondary-button { justify-self: start; }
+.supervised-busy-status {
+  align-items: center;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  display: none;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 12px;
+}
+.supervised-action-forms.is-busy .supervised-busy-status { display: flex; }
+.supervised-busy-status::before {
+  animation: supervised-spin .8s linear infinite;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 50%;
+  border-top-color: var(--accent);
+  content: "";
+  flex: 0 0 auto;
+  height: 14px;
+  width: 14px;
+}
+@keyframes supervised-spin { to { transform: rotate(360deg); } }
+.supervised-action-forms.is-busy {
+  opacity: .92;
+  pointer-events: none;
+}
+button.is-busy-submit {
+  opacity: 1;
+  position: relative;
+}
 .story-confirm-overlay { align-items: center; background: rgba(0,0,0,.52); display: flex; inset: 0; justify-content: center; padding: 20px; position: fixed; z-index: 20; }
 .story-confirm-overlay[hidden] { display: none; }
 .story-confirm-popup { background: var(--surface); border: 1px solid var(--line-strong); box-shadow: 0 18px 60px rgba(0,0,0,.3); max-width: 480px; padding: 22px; width: 100%; }

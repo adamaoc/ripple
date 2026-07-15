@@ -116,6 +116,27 @@
       if (!form) return;
       const input = form.querySelector('input[name="redirect"]');
       if (input) input.value = location.pathname + location.search;
+
+      if (!form.hasAttribute('data-busy-submit') || form.dataset.busy === '1') return;
+      const submitter = event.submitter || form.querySelector('button[type="submit"]:not([disabled])');
+      if (!submitter || submitter.disabled) return;
+      form.dataset.busy = '1';
+
+      const host = form.closest('[data-supervised-actions]') || form;
+      host.classList.add('is-busy');
+      const status = host.querySelector('[data-supervised-busy-status]');
+      const busyLabel = submitter.dataset.busyLabel || 'Working…';
+      if (status) {
+        status.hidden = false;
+        status.textContent = busyLabel;
+      }
+      host.querySelectorAll('button[type="submit"]').forEach((button) => {
+        button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
+      });
+      submitter.classList.add('is-busy-submit');
+      submitter.dataset.originalLabel = submitter.textContent;
+      submitter.textContent = busyLabel;
     });
 
     const runRoot = document.querySelector('[data-run-root]');

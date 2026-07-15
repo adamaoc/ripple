@@ -33,20 +33,21 @@
     <p class="muted">No pull request is linked on the pipeline record for this story.</p>
     {{end}}
   </div>
-  <div class="supervised-action-forms">
-    <form method="post" action="/stories/{{.Story.ID}}/address-feedback" data-current-redirect class="supervised-action-form">
+  <div class="supervised-action-forms" data-supervised-actions>
+    <p class="supervised-busy-status" data-supervised-busy-status hidden role="status" aria-live="polite"></p>
+    <form method="post" action="/stories/{{.Story.ID}}/address-feedback" data-current-redirect data-busy-submit class="supervised-action-form">
       <input type="hidden" name="redirect">
-      <button type="submit" class="primary-button" {{if or (not .Pipeline) (not .Pipeline.PRURL)}}disabled{{end}} onclick="this.form.elements.redirect.value=location.pathname+location.search">Act on review comments</button>
+      <button type="submit" class="primary-button" data-busy-label="Working on review comments…" {{if or (not .Pipeline) (not .Pipeline.PRURL)}}disabled{{end}}>Act on review comments</button>
       <p class="muted settings-help">Have the agent read the latest PR feedback and push fixes. The story will wait for you again. No quality gate runs on this step.</p>
     </form>
-    <form method="post" action="/stories/{{.Story.ID}}/merge" data-current-redirect class="supervised-action-form">
+    <form method="post" action="/stories/{{.Story.ID}}/merge" data-current-redirect data-busy-submit class="supervised-action-form">
       <input type="hidden" name="redirect">
-      <button type="submit" class="secondary-button" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}} onclick="this.form.elements.redirect.value=location.pathname+location.search">Merge pull request</button>
+      <button type="submit" class="secondary-button" data-busy-label="Merging pull request…" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}}>Merge pull request</button>
       <p class="muted settings-help">Runs checks, merges the PR, and marks the story done.</p>
     </form>
-    <form method="post" action="/stories/{{.Story.ID}}/sync-pr" data-current-redirect class="supervised-action-form">
+    <form method="post" action="/stories/{{.Story.ID}}/sync-pr" data-current-redirect data-busy-submit class="supervised-action-form">
       <input type="hidden" name="redirect">
-      <button type="submit" class="secondary-button" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}} onclick="this.form.elements.redirect.value=location.pathname+location.search">Sync PR status</button>
+      <button type="submit" class="secondary-button" data-busy-label="Syncing PR status…" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}}>Sync PR status</button>
       <p class="muted settings-help">If you already merged on GitHub, update the story to done without merging again.</p>
     </form>
   </div>
