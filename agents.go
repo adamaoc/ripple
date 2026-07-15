@@ -158,7 +158,6 @@ func (r *GrokCLIRunner) Run(ctx context.Context, req AgentRunRequest) (AgentRunR
 	}
 	args := []string{
 		"-p", req.Prompt,
-		"-m", "grok-build",
 		"--cwd", req.WorkingDir,
 		"--sandbox", "workspace",
 		"--always-approve",
