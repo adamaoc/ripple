@@ -1514,9 +1514,16 @@ func TestRunPageShowsAwaitingHumanSummary(t *testing.T) {
 	for _, marker := range []string{
 		"waiting on you",
 		"Awaiting you",
-		"Pull requests awaiting your review",
+		"Waiting on you",
 		"https://example.com/pull/7",
 		"Queue finished",
+		`action="/stories/` + story.ID + `/address-feedback"`,
+		`action="/stories/` + story.ID + `/merge"`,
+		`action="/stories/` + story.ID + `/sync-pr"`,
+		"Act on review comments",
+		"Merge pull request",
+		"Sync PR status",
+		fmt.Sprintf(`value="/projects/atlas/runs/%d"`, runID),
 	} {
 		if !strings.Contains(body, marker) {
 			t.Fatalf("run page missing %q in body", marker)

@@ -53,6 +53,43 @@
             </div>
           </details>
           {{else}}<div class="transcript-empty"><span class="mono">&gt;_</span><h3>Waiting for the first agent event</h3><p>The transcript will build here as the run advances.</p></div>{{end}}
+          {{if .Run.Summary.AwaitingHumanPRs}}
+          <section class="run-human-actions" data-run-section="awaiting-human">
+            <div class="run-human-actions-heading">
+              <div><span class="eyebrow">Supervised delivery</span><h3>Waiting on you</h3></div>
+              <p class="muted">Review each PR, leave feedback if needed, then act here without leaving the run.</p>
+            </div>
+            {{range .Run.Summary.AwaitingHumanPRs}}
+            <article class="run-human-action-card" data-supervised-actions>
+              <div class="run-human-action-meta">
+                <strong class="mono">{{.StoryID}}</strong>
+                <h4>{{.StoryTitle}}</h4>
+                <p class="pr-link-row">
+                  <a href="{{.URL}}" target="_blank" rel="noopener">Open pull request #{{.Number}}</a>
+                  {{if .Branch}}<span class="mono muted">{{.Branch}}</span>{{end}}
+                </p>
+              </div>
+              <p class="supervised-busy-status" data-supervised-busy-status hidden role="status" aria-live="polite"></p>
+              <div class="run-human-action-buttons">
+                <form method="post" action="/stories/{{.StoryID}}/address-feedback" data-current-redirect data-busy-submit class="supervised-action-form">
+                  <input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/runs/{{$.Run.Run.ID}}">
+                  <button type="submit" class="primary-button" data-busy-label="Working on review comments…" {{if $.Run.Agent.Running}}disabled{{end}}>Act on review comments</button>
+                </form>
+                <form method="post" action="/stories/{{.StoryID}}/merge" data-current-redirect data-busy-submit class="supervised-action-form">
+                  <input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/runs/{{$.Run.Run.ID}}">
+                  <button type="submit" class="secondary-button" data-busy-label="Merging pull request…" {{if $.Run.Agent.Running}}disabled{{end}}>Merge pull request</button>
+                </form>
+                <form method="post" action="/stories/{{.StoryID}}/sync-pr" data-current-redirect data-busy-submit class="supervised-action-form">
+                  <input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/runs/{{$.Run.Run.ID}}">
+                  <button type="submit" class="secondary-button" data-busy-label="Syncing PR status…" {{if $.Run.Agent.Running}}disabled{{end}}>Sync PR status</button>
+                </form>
+              </div>
+              <p class="muted settings-help">Act on feedback re-reads the latest PR comments and pushes fixes. Merge runs checks then merges. Sync marks done if you already merged on GitHub.</p>
+            </article>
+            {{end}}
+            {{if .Run.Agent.Running}}<p class="inline-notice">An agent action is already running. Wait for it to finish before starting another.</p>{{end}}
+          </section>
+          {{end}}
           {{if .Run.Run.FinishedAt}}
           <details class="run-completion-summary" data-run-section="completion" open>
             <summary><div><span class="eyebrow">Run complete</span><h3>{{if gt .Run.Summary.AwaitingHumanCount 0}}Queue finished — {{.Run.Summary.AwaitingHumanCount}} waiting on you{{else if eq .Run.Run.Status "completed"}}Work finished successfully{{else if eq .Run.Run.Status "stopped"}}Run was stopped{{else}}Run finished with an issue{{end}}</h3></div><span class="status-label status-{{.Run.Run.Status}}"><i></i>{{.Run.Run.Status}}</span></summary>
@@ -68,11 +105,6 @@
             {{if .Run.Summary.MergedPRs}}
             <div class="completion-prs"><h4>Merged pull requests</h4>
               {{range .Run.Summary.MergedPRs}}<a href="{{.URL}}" target="_blank" rel="noopener"><span><strong>{{.StoryID}} · PR #{{.Number}}</strong><small>{{.StoryTitle}}{{if .Branch}} · <span class="mono">{{.Branch}}</span>{{end}}</small></span><span aria-hidden="true">↗</span></a>{{end}}
-            </div>
-            {{end}}
-            {{if .Run.Summary.AwaitingHumanPRs}}
-            <div class="completion-prs completion-prs-awaiting"><h4>Pull requests awaiting your review</h4>
-              {{range .Run.Summary.AwaitingHumanPRs}}<a href="{{.URL}}" target="_blank" rel="noopener"><span><strong>{{.StoryID}} · PR #{{.Number}}</strong><small>{{.StoryTitle}}{{if .Branch}} · <span class="mono">{{.Branch}}</span>{{end}} · waiting on you</small></span><span aria-hidden="true">↗</span></a>{{end}}
             </div>
             {{end}}
             {{if .Run.Summary.OpenPRs}}
