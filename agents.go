@@ -433,15 +433,16 @@ func (p AgentProvider) APIConfig() APIProviderConfig {
 	return parseAPIProviderConfig(p.ConfigJSON)
 }
 
+// IsImplementerCapable reports whether this provider can write code for stories.
+// CLI tools can implement; HTTP API providers cannot (no file-edit tools in v1).
 func (p AgentProvider) IsImplementerCapable() bool {
-	return p.Kind == ProviderKindCLI && p.ID == ProviderIDCodexCLI
+	return p.Kind == ProviderKindCLI
 }
 
+// IsReviewerCapable reports whether this provider can review pull requests.
+// Any CLI or OpenAI-compatible API provider may review.
 func (p AgentProvider) IsReviewerCapable() bool {
-	if p.Kind == ProviderKindAPI {
-		return true
-	}
-	return p.Kind == ProviderKindCLI && p.ID == ProviderIDGrokCLI
+	return p.Kind == ProviderKindCLI || p.Kind == ProviderKindAPI
 }
 
 func (p AgentProvider) MaskedAPIKey() string {

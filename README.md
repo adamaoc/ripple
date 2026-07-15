@@ -122,8 +122,8 @@ Open **Settings → Agents** for app-wide tooling (not per project).
 
 | Role | Who can fill it |
 | --- | --- |
-| **Implementer** | CLI only (Codex CLI today) — writes code and applies fix passes |
-| **Reviewer** | Grok CLI **or** an OpenAI-compatible HTTP API provider |
+| **Implementer** | CLI only (Codex or Grok) — writes code and applies fix passes |
+| **Reviewer** | Codex CLI, Grok CLI, **or** an OpenAI-compatible HTTP API provider |
 
 Path precedence for CLI binaries:
 
@@ -181,8 +181,8 @@ Install and authenticate tools on the same machine as Ripple:
 
 | Tool | Role | Check |
 | --- | --- | --- |
-| [Codex CLI](https://developers.openai.com/codex/cli/) | Implementer (default) | `codex --version` |
-| [Grok CLI](https://docs.x.ai/build/overview) | Reviewer (default) | `grok --version` |
+| [Codex CLI](https://developers.openai.com/codex/cli/) | Implementer (default) or Reviewer | `codex --version` |
+| [Grok CLI](https://docs.x.ai/build/overview) | Reviewer (default) or Implementer | `grok --version` |
 | [GitHub CLI](https://cli.github.com/) | PRs, comments, merges | `gh auth status` |
 
 Optional: Settings → Agents for path overrides; Settings → API providers for an HTTP reviewer.
@@ -308,7 +308,7 @@ Do not expose Ripple directly to the public internet. Review a story's scope bef
 Current intentional constraints:
 
 - One agent activity at a time (queue runs and manual “act on feedback” share a global lock).
-- Implementer is CLI-only; API integrations are reviewer-capable only.
+- Implementer is CLI-only (Codex or Grok); API integrations are reviewer-capable only. Either role may use the same CLI.
 - Stories are archived by closing them rather than deleting history.
 - GitHub is the supported pull-request provider.
 - Done means merged — never on PR open alone.

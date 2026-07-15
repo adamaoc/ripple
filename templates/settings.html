@@ -44,10 +44,10 @@
               Implementer
               <select name="implementerProviderId">
                 {{range .SettingsAgents.ImplementerOptions}}
-                  <option value="{{.ID}}" {{if eq $.SettingsAgents.ImplementerProviderID .ID}}selected{{end}}>{{.Name}} — writes code for stories</option>
+                  <option value="{{.ID}}" {{if eq $.SettingsAgents.ImplementerProviderID .ID}}selected{{end}}>{{.Name}}</option>
                 {{end}}
               </select>
-              <small class="settings-help">CLI only in this version. API providers cannot implement yet (they cannot edit files).</small>
+              <small class="settings-help">CLI tools that can edit files (Codex or Grok). You may use the same tool for both roles. API providers cannot implement yet.</small>
             </label>
             <label>
               Reviewer
@@ -56,7 +56,7 @@
                   <option value="{{.ID}}" {{if eq $.SettingsAgents.ReviewerProviderID .ID}}selected{{end}}>{{.Name}}{{if eq .Kind "api"}} (API){{end}}</option>
                 {{end}}
               </select>
-              <small class="settings-help">Grok CLI or an OpenAI-compatible HTTP API. Reviews pull requests independently.</small>
+              <small class="settings-help">Codex CLI, Grok CLI, or an OpenAI-compatible HTTP API. Reviews pull requests independently.</small>
             </label>
           </div>
 

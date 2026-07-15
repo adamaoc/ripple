@@ -101,10 +101,19 @@ func TestSettingsOwnsThemeControlsAndUtilityNavigation(t *testing.T) {
 		"API providers",
 		`action="/settings/agents"`,
 		`action="/settings/agents/api-providers"`,
+		`value="codex_cli"`,
+		`value="grok_cli"`,
 	} {
 		if !strings.Contains(body, marker) {
 			t.Fatalf("settings page missing %q", marker)
 		}
+	}
+	// Both CLI providers must appear in both role dropdowns (not filtered to one each).
+	if c := strings.Count(body, `value="codex_cli"`); c < 2 {
+		t.Fatalf("codex_cli options = %d, want at least 2 (implementer + reviewer)", c)
+	}
+	if c := strings.Count(body, `value="grok_cli"`); c < 2 {
+		t.Fatalf("grok_cli options = %d, want at least 2 (implementer + reviewer)", c)
 	}
 	if strings.Contains(body, "data-theme-toggle") {
 		t.Fatalf("theme toggle should no longer live in the navigation rail")

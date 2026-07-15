@@ -261,6 +261,47 @@ func TestAPIProviderCannotBeImplementer(t *testing.T) {
 	}
 }
 
+func TestCLIProvidersCanFillEitherRoleOrBoth(t *testing.T) {
+	app := testApp(t)
+	// Swap defaults: Grok implements, Codex reviews.
+	if err := app.updateAppAgentRoles(context.Background(), ProviderIDGrokCLI, ProviderIDCodexCLI); err != nil {
+		t.Fatalf("swap roles: %v", err)
+	}
+	cfg, err := app.getAppAgentConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ImplementerProviderID != ProviderIDGrokCLI || cfg.ReviewerProviderID != ProviderIDCodexCLI {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+	// Same agent for both roles is allowed.
+	if err := app.updateAppAgentRoles(context.Background(), ProviderIDCodexCLI, ProviderIDCodexCLI); err != nil {
+		t.Fatalf("same agent both roles: %v", err)
+	}
+	cfg, err = app.getAppAgentConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ImplementerProviderID != ProviderIDCodexCLI || cfg.ReviewerProviderID != ProviderIDCodexCLI {
+		t.Fatalf("same-agent cfg = %+v", cfg)
+	}
+}
+
+func TestCLIProviderCapabilities(t *testing.T) {
+	codex := AgentProvider{ID: ProviderIDCodexCLI, Kind: ProviderKindCLI, Name: "Codex CLI"}
+	grok := AgentProvider{ID: ProviderIDGrokCLI, Kind: ProviderKindCLI, Name: "Grok CLI"}
+	api := AgentProvider{ID: "api_x", Kind: ProviderKindAPI, Name: "API"}
+	if !codex.IsImplementerCapable() || !codex.IsReviewerCapable() {
+		t.Fatal("codex should be usable as implementer and reviewer")
+	}
+	if !grok.IsImplementerCapable() || !grok.IsReviewerCapable() {
+		t.Fatal("grok should be usable as implementer and reviewer")
+	}
+	if api.IsImplementerCapable() || !api.IsReviewerCapable() {
+		t.Fatal("api should be reviewer-only")
+	}
+}
+
 func TestDefaultCLIPathStillResolves(t *testing.T) {
 	app := testApp(t)
 	// Defaults: implementer codex_cli, reviewer grok_cli — resolution errors only if binaries missing.

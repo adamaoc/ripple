@@ -250,10 +250,10 @@ func (a *App) updateAppAgentRoles(ctx context.Context, implementerID, reviewerID
 		return badRequest("reviewer provider was not found")
 	}
 	if !impl.IsImplementerCapable() {
-		return badRequest("Implementer must be a CLI provider that can write code (Codex CLI in v1). API providers cannot be implementers yet.")
+		return badRequest("Implementer must be a CLI provider (Codex or Grok). API providers cannot implement yet because they cannot edit files.")
 	}
 	if !rev.IsReviewerCapable() {
-		return badRequest("Reviewer must be Grok CLI or an OpenAI-compatible API provider")
+		return badRequest("Reviewer must be a CLI provider (Codex or Grok) or an OpenAI-compatible API provider")
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = a.db.ExecContext(ctx, `UPDATE app_config SET implementer_provider_id = ?, reviewer_provider_id = ?, updated_at = ? WHERE id = 1`,
@@ -273,9 +273,9 @@ func (a *App) resolveImplementer(ctx context.Context) (AgentRoleResolved, error)
 		return AgentRoleResolved{}, badRequest("Implementer is not configured. Open Settings → Agents and choose a provider.")
 	}
 	if !provider.IsImplementerCapable() {
-		return AgentRoleResolved{}, badRequest("Implementer must be Codex CLI in this version")
+		return AgentRoleResolved{}, badRequest("Implementer must be a CLI provider (Codex or Grok). API providers cannot implement yet.")
 	}
-	path, err := resolveCodexBinaryWithSettings(provider.CLIConfig().BinaryPath)
+	path, err := resolveCLIBinaryForProvider(provider)
 	if err != nil {
 		return AgentRoleResolved{}, badRequest("Implementer not available: " + err.Error())
 	}
@@ -288,7 +288,7 @@ func (a *App) resolveImplementer(ctx context.Context) (AgentRoleResolved, error)
 	}, nil
 }
 
-// resolveReviewer returns the configured reviewer (Grok CLI or HTTP API).
+// resolveReviewer returns the configured reviewer (CLI or HTTP API).
 // Precedence for CLI path: env override > settings path > auto-detect.
 func (a *App) resolveReviewer(ctx context.Context) (AgentRoleResolved, error) {
 	cfg, err := a.getAppAgentConfig(ctx)
@@ -300,7 +300,7 @@ func (a *App) resolveReviewer(ctx context.Context) (AgentRoleResolved, error) {
 		return AgentRoleResolved{}, badRequest("Reviewer is not configured. Open Settings → Agents and choose a provider.")
 	}
 	if !provider.IsReviewerCapable() {
-		return AgentRoleResolved{}, badRequest("Reviewer must be Grok CLI or an OpenAI-compatible API provider")
+		return AgentRoleResolved{}, badRequest("Reviewer must be a CLI provider or an OpenAI-compatible API provider")
 	}
 	resolved := AgentRoleResolved{
 		Role:         AgentRoleReviewer,
@@ -319,7 +319,7 @@ func (a *App) resolveReviewer(ctx context.Context) (AgentRoleResolved, error) {
 		resolved.API = api
 		return resolved, nil
 	}
-	path, err := resolveGrokBinaryWithSettings(provider.CLIConfig().BinaryPath)
+	path, err := resolveCLIBinaryForProvider(provider)
 	if err != nil {
 		return AgentRoleResolved{}, badRequest("Reviewer not available: " + err.Error())
 	}
@@ -327,16 +327,52 @@ func (a *App) resolveReviewer(ctx context.Context) (AgentRoleResolved, error) {
 	return resolved, nil
 }
 
+// resolveCLIBinaryForProvider picks the correct binary resolution for a seeded CLI provider.
+func resolveCLIBinaryForProvider(provider AgentProvider) (string, error) {
+	settingsPath := provider.CLIConfig().BinaryPath
+	switch provider.ID {
+	case ProviderIDGrokCLI:
+		return resolveGrokBinaryWithSettings(settingsPath)
+	case ProviderIDCodexCLI:
+		return resolveCodexBinaryWithSettings(settingsPath)
+	default:
+		// Unknown CLI providers: treat settings path as the binary, else fail clearly.
+		if strings.TrimSpace(settingsPath) != "" {
+			expanded, err := expandUserPath(settingsPath)
+			if err != nil {
+				return "", err
+			}
+			if info, err := os.Stat(expanded); err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
+				return expanded, nil
+			}
+		}
+		return "", badRequest("CLI binary for " + provider.Name + " was not found. Set a path in Settings → Agents.")
+	}
+}
+
+func cliRunnerForResolved(resolved AgentRoleResolved) AgentRunner {
+	switch resolved.ProviderID {
+	case ProviderIDGrokCLI:
+		return &GrokCLIRunner{
+			BinaryPath:   resolved.BinaryPath,
+			providerID:   resolved.ProviderID,
+			providerName: resolved.ProviderName,
+		}
+	default:
+		return &CodexCLIRunner{
+			BinaryPath:   resolved.BinaryPath,
+			providerID:   resolved.ProviderID,
+			providerName: resolved.ProviderName,
+		}
+	}
+}
+
 func (a *App) newImplementerRunner(ctx context.Context) (AgentRunner, error) {
 	resolved, err := a.resolveImplementer(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &CodexCLIRunner{
-		BinaryPath:   resolved.BinaryPath,
-		providerID:   resolved.ProviderID,
-		providerName: resolved.ProviderName,
-	}, nil
+	return cliRunnerForResolved(resolved), nil
 }
 
 func (a *App) newReviewerRunner(ctx context.Context) (AgentRunner, error) {
@@ -351,11 +387,7 @@ func (a *App) newReviewerRunner(ctx context.Context) (AgentRunner, error) {
 			Config:       resolved.API,
 		}, nil
 	}
-	return &GrokCLIRunner{
-		BinaryPath:   resolved.BinaryPath,
-		providerID:   resolved.ProviderID,
-		providerName: resolved.ProviderName,
-	}, nil
+	return cliRunnerForResolved(resolved), nil
 }
 
 func newAPIProviderID() string {

@@ -63,7 +63,7 @@ Optional delivery fields (all have safe defaults that preserve current behavior)
 
 ### Global agent settings (UI only)
 
-Implementer and Reviewer bindings live on the **Settings** page (app-wide, not per project). The Bot API does not configure agents. Defaults: Codex CLI implements; Grok CLI reviews. An OpenAI-compatible HTTP provider may be selected as Reviewer only.
+Implementer and Reviewer bindings live on the **Settings** page (app-wide, not per project). The Bot API does not configure agents. Defaults: Codex CLI implements; Grok CLI reviews. Either CLI may fill either role (including both). An OpenAI-compatible HTTP provider may be selected as Reviewer only.
 
 ## Create a Project
 
