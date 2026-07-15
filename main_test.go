@@ -684,6 +684,23 @@ func TestAddressFeedbackWrongStatusRejected(t *testing.T) {
 	}
 }
 
+func TestResolveConflictsWrongStatusRejected(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	form := url.Values{"redirect": {"/projects/atlas/backlog"}}
+	req := httptest.NewRequest(http.MethodPost, "/stories/"+stories[0].ID+"/resolve-conflicts", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, req)
+	if res.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d; body = %s", res.Code, res.Body.String())
+	}
+	decoded, _ := url.QueryUnescape(res.Header().Get("Location"))
+	if !strings.Contains(decoded, "in review") {
+		t.Fatalf("expected in-review error, got %q", decoded)
+	}
+}
+
 func TestAddressFeedbackHappyPathReturnsToInReview(t *testing.T) {
 	app := testApp(t)
 	project, err := app.createProject(context.Background(), "atlas", "Atlas", "A", "/tmp", AutonomySupervised)
@@ -851,10 +868,13 @@ func TestStoryPanelShowsAddressFeedbackForInReview(t *testing.T) {
 		"Act on review comments",
 		`action="/stories/` + story.ID + `/address-feedback"`,
 		`action="/stories/` + story.ID + `/merge"`,
+		`action="/stories/` + story.ID + `/resolve-conflicts"`,
 		"Merge pull request",
+		"Fix merge conflicts",
+		"I already merged on GitHub",
 		"https://github.com/acme/atlas/pull/3",
 		"Open pull request",
-		"marks the story done",
+		"action-menu",
 	} {
 		if !strings.Contains(body, marker) {
 			t.Fatalf("story panel missing %q", marker)
@@ -1282,11 +1302,20 @@ func TestEventAndQueueItemTitles(t *testing.T) {
 	if got := eventTitle(eventAddressingFeedback); got != "Addressing feedback" {
 		t.Fatalf("eventTitle addressing = %q", got)
 	}
+	if got := eventTitle(eventResolvingConflicts); got != "Resolving conflicts" {
+		t.Fatalf("eventTitle resolving = %q", got)
+	}
+	if got := eventTitle(eventConflictsResolved); got != "Conflicts resolved" {
+		t.Fatalf("eventTitle resolved = %q", got)
+	}
 	if got := eventTitle(eventMergedByHuman); got != "Merged by you" {
 		t.Fatalf("eventTitle merged by human = %q", got)
 	}
 	if got := eventTitle(eventMergedExternally); got != "Synced external merge" {
 		t.Fatalf("eventTitle external = %q", got)
+	}
+	if got := runKindTitle(RunKindCodexResolveConflicts); got != "Resolve merge conflicts" {
+		t.Fatalf("runKindTitle resolve = %q", got)
 	}
 	if got := queueItemStatusTitle(QueueItemAwaitingHuman); got != "waiting on you" {
 		t.Fatalf("queue item title = %q", got)
@@ -1586,7 +1615,10 @@ func TestRunPageShowsAwaitingHumanSummary(t *testing.T) {
 		"Act on review comments",
 		"Merge pull request",
 		"I already merged on GitHub",
+		"Fix merge conflicts",
+		`action="/stories/` + story.ID + `/resolve-conflicts"`,
 		"Waiting on you",
+		"action-menu",
 		fmt.Sprintf(`value="/projects/atlas/runs/%d"`, runID),
 	} {
 		if !strings.Contains(body, marker) {

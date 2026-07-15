@@ -35,21 +35,34 @@
   </div>
   <div class="supervised-action-forms" data-supervised-actions>
     <p class="supervised-busy-status" data-supervised-busy-status hidden role="status" aria-live="polite"></p>
-    <form method="post" action="/stories/{{.Story.ID}}/address-feedback" data-current-redirect data-busy-submit class="supervised-action-form">
-      <input type="hidden" name="redirect">
-      <button type="submit" class="primary-button" data-busy-label="Working on review comments…" {{if or (not .Pipeline) (not .Pipeline.PRURL)}}disabled{{end}}>Act on review comments</button>
-      <p class="muted settings-help">Have the agent read the latest PR feedback and push fixes. The story will wait for you again. No quality gate runs on this step.</p>
-    </form>
-    <form method="post" action="/stories/{{.Story.ID}}/merge" data-current-redirect data-busy-submit class="supervised-action-form">
-      <input type="hidden" name="redirect">
-      <button type="submit" class="secondary-button" data-busy-label="Merging pull request…" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}}>Merge pull request</button>
-      <p class="muted settings-help">Runs checks, merges the PR, and marks the story done.</p>
-    </form>
-    <form method="post" action="/stories/{{.Story.ID}}/sync-pr" data-current-redirect data-busy-submit class="supervised-action-form">
-      <input type="hidden" name="redirect">
-      <button type="submit" class="secondary-button" data-busy-label="Checking GitHub merge…" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}}>I already merged on GitHub</button>
-      <p class="muted settings-help">Use this only if you merged the PR in GitHub yourself. Ripple checks that it is merged, then marks the story done — it does not merge again.</p>
-    </form>
+    <div class="run-human-action-buttons">
+      <form method="post" action="/stories/{{.Story.ID}}/address-feedback" data-current-redirect data-busy-submit class="supervised-action-form">
+        <input type="hidden" name="redirect">
+        <button type="submit" class="primary-button" data-busy-label="Working on review comments…" {{if or (not .Pipeline) (not .Pipeline.PRURL)}}disabled{{end}}>Act on review comments</button>
+      </form>
+      <form method="post" action="/stories/{{.Story.ID}}/merge" data-current-redirect data-busy-submit class="supervised-action-form">
+        <input type="hidden" name="redirect">
+        <button type="submit" class="secondary-button" data-busy-label="Merging pull request…" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}}>Merge pull request</button>
+      </form>
+      <details class="action-menu">
+        <summary class="secondary-button action-menu-trigger" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}aria-disabled="true"{{end}} aria-label="More actions">⋯</summary>
+        <div class="action-menu-panel" role="menu">
+          <form method="post" action="/stories/{{.Story.ID}}/resolve-conflicts" data-current-redirect data-busy-submit class="supervised-action-form">
+            <input type="hidden" name="redirect">
+            <button type="submit" role="menuitem" data-busy-label="Fixing merge conflicts…" {{if or (not .Pipeline) (not .Pipeline.Branch)}}disabled{{end}}>Fix merge conflicts</button>
+          </form>
+          <form method="post" action="/stories/{{.Story.ID}}/sync-pr" data-current-redirect data-busy-submit class="supervised-action-form">
+            <input type="hidden" name="redirect">
+            <button type="submit" role="menuitem" data-busy-label="Checking GitHub merge…" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}}>I already merged on GitHub</button>
+          </form>
+        </div>
+      </details>
+    </div>
+    <p class="muted settings-help">
+      <strong>Act on review comments</strong> — agent reads the latest PR feedback and pushes fixes (no quality gate).<br>
+      <strong>Merge pull request</strong> — runs checks, merges on GitHub, marks the story done.<br>
+      <strong>⋯ More</strong> — fix conflicts with main, or mark done if you already merged on GitHub.
+    </p>
   </div>
 </section>
 {{end}}

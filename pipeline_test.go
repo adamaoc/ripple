@@ -244,3 +244,124 @@ func TestQualityGateChecksIncludeBuildAndTypecheck(t *testing.T) {
 		t.Fatalf("qualityGateChecks() = %#v, want %#v", got, want)
 	}
 }
+
+func TestBuildCodexResolveConflictsPrompt(t *testing.T) {
+	prompt := buildCodexResolveConflictsPrompt(
+		"http://localhost:8080", "docs",
+		Project{Name: "Atlas", WorkingDirectory: "/tmp"},
+		Story{ID: "A-001", Title: "T", Description: "D"},
+		"ripple/A-001-t", "main", 9, "https://example.com/pull/9",
+	)
+	for _, marker := range []string{
+		"resolve merge conflicts",
+		"ripple/A-001-t",
+		"main",
+		"<<<<<<<",
+		"#9",
+		"https://example.com/pull/9",
+		"Do not push",
+		"A-001",
+	} {
+		if !strings.Contains(prompt, marker) {
+			t.Fatalf("prompt missing %q", marker)
+		}
+	}
+}
+
+func TestGitPreflightUpdatesFromOrigin(t *testing.T) {
+	// origin (bare) <- main repo; main is updated on origin after local clone diverges.
+	bare := t.TempDir()
+	mustRunGit(t, bare, "init", "--bare")
+	seed := t.TempDir()
+	mustRunGit(t, seed, "init")
+	mustRunGit(t, seed, "config", "user.email", "t@example.com")
+	mustRunGit(t, seed, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(seed, "a.txt"), []byte("one\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, seed, "add", ".")
+	mustRunGit(t, seed, "commit", "-m", "init")
+	mustRunGit(t, seed, "branch", "-M", "main")
+	mustRunGit(t, seed, "remote", "add", "origin", bare)
+	mustRunGit(t, seed, "push", "-u", "origin", "main")
+
+	work := t.TempDir()
+	mustRunGit(t, work, "clone", bare, work)
+	mustRunGit(t, work, "config", "user.email", "t@example.com")
+	mustRunGit(t, work, "config", "user.name", "t")
+
+	// Advance origin/main after the clone.
+	if err := os.WriteFile(filepath.Join(seed, "a.txt"), []byte("two\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, seed, "add", ".")
+	mustRunGit(t, seed, "commit", "-m", "second")
+	mustRunGit(t, seed, "push", "origin", "main")
+
+	branch, err := gitPreflight(t.Context(), work, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if branch != "main" {
+		t.Fatalf("branch = %q", branch)
+	}
+	body, err := os.ReadFile(filepath.Join(work, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "two\n" {
+		t.Fatalf("local main not updated from origin; a.txt = %q", body)
+	}
+}
+
+func TestGitMergeBaseIntoFeatureDetectsConflicts(t *testing.T) {
+	dir := t.TempDir()
+	mustRunGit(t, dir, "init")
+	mustRunGit(t, dir, "config", "user.email", "t@example.com")
+	mustRunGit(t, dir, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("base\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, dir, "add", ".")
+	mustRunGit(t, dir, "commit", "-m", "base")
+	mustRunGit(t, dir, "branch", "-M", "main")
+	mustRunGit(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("feature\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, dir, "add", ".")
+	mustRunGit(t, dir, "commit", "-m", "feature change")
+	mustRunGit(t, dir, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("mainline\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, dir, "add", ".")
+	mustRunGit(t, dir, "commit", "-m", "main change")
+
+	// Simulate origin/* refs for merge helper (no real remote).
+	mustRunGit(t, dir, "update-ref", "refs/remotes/origin/main", "main")
+	mustRunGit(t, dir, "update-ref", "refs/remotes/origin/feature", "feature")
+
+	// fetch will no-op without origin remote; merge uses origin/main ref we created.
+	// Provide a dummy origin remote so gitFetchOrigin tries fetch (may fail) — better skip fetch by having remote get-url fail...
+	// Our helper uses origin/main via rev-parse; fetch is skipped without remote. Good.
+
+	hadConflicts, err := gitMergeBaseIntoFeature(t.Context(), dir, "feature", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hadConflicts {
+		t.Fatal("expected merge conflicts")
+	}
+	ok, err := gitHasUnresolvedConflicts(t.Context(), dir)
+	if err != nil || !ok {
+		t.Fatalf("expected unresolved conflicts, ok=%v err=%v", ok, err)
+	}
+}
+
+func mustRunGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if _, stderr, err := runCommand(t.Context(), dir, "git", args...); err != nil {
+		t.Fatalf("git %v: %v (%s)", args, err, stderr)
+	}
+}

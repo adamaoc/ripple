@@ -114,7 +114,8 @@ On supervised stories in the story panel:
 
 - **Act on review comments** — Agent applies PR feedback and pushes (no quality gate on this step)
 - **Merge pull request** — Quality gate, then merge, then `done`
-- **I already merged on GitHub** — If you merged outside Ripple, verify that and mark the story done (does not merge again)
+- **⋯ Fix merge conflicts** — Merge latest base into the feature branch and run the implementer to resolve conflict markers
+- **⋯ I already merged on GitHub** — If you merged outside Ripple, verify that and mark the story done (does not merge again)
 
 ## Agent settings
 

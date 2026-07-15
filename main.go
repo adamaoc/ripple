@@ -422,6 +422,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /stories/{id}/status", a.handleUIStatus)
 	mux.HandleFunc("POST /stories/{id}/description", a.handleUIDescription)
 	mux.HandleFunc("POST /stories/{id}/address-feedback", a.handleUIAddressFeedback)
+	mux.HandleFunc("POST /stories/{id}/resolve-conflicts", a.handleUIResolveConflicts)
 	mux.HandleFunc("POST /stories/{id}/merge", a.handleUIMergeStory)
 	mux.HandleFunc("POST /stories/{id}/sync-pr", a.handleUISyncPR)
 	mux.HandleFunc("POST /stories/{id}/close", a.handleUIClose)
@@ -1078,6 +1079,18 @@ func (a *App) handleUIAddressFeedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.startAddressFeedback(r.PathValue("id"), requestBaseURL(r)); err != nil {
+		a.finishUIActionError(w, r, err)
+		return
+	}
+	a.finishUIAction(w, r)
+}
+
+func (a *App) handleUIResolveConflicts(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		a.finishUIActionError(w, r, err)
+		return
+	}
+	if err := a.startResolveConflicts(r.PathValue("id"), requestBaseURL(r)); err != nil {
 		a.finishUIActionError(w, r, err)
 		return
 	}
@@ -2679,7 +2692,7 @@ func (a *App) runCodexForStoryWithKind(ctx context.Context, queueRunID int64, ba
 		},
 	}
 	role := AgentRunRoleImplement
-	if runKind == RunKindCodexFix || runKind == RunKindCodexAddressFeedback {
+	if runKind == RunKindCodexFix || runKind == RunKindCodexAddressFeedback || runKind == RunKindCodexResolveConflicts {
 		role = AgentRunRoleFix
 	}
 	result, err := runner.Run(ctx, AgentRunRequest{
@@ -2808,6 +2821,50 @@ func (a *App) startAddressFeedback(storyID, baseURL string) error {
 				message = "Address feedback stopped"
 			} else {
 				message = "Address feedback failed"
+			}
+		}
+		a.finishManualAgentWork(pipeline.QueueRunID, message, runErr)
+	}()
+	return nil
+}
+
+func (a *App) startResolveConflicts(storyID, baseURL string) error {
+	story, project, pipeline, defaultBranch, err := a.prepareResolveConflicts(context.Background(), storyID)
+	if err != nil {
+		return err
+	}
+	if _, err := a.resolveImplementer(context.Background()); err != nil {
+		return err
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	a.agentMu.Lock()
+	if a.agentStatus.Running {
+		a.agentMu.Unlock()
+		cancel()
+		return badRequest("An agent is already running. Wait for it to finish or stop it first.")
+	}
+	a.agentStatus = AgentStatus{
+		Running:        true,
+		QueueRunID:     pipeline.QueueRunID,
+		CurrentStoryID: story.ID,
+		Message:        "Resolving merge conflicts",
+		StartedAt:      time.Now().UTC(),
+		Total:          1,
+	}
+	a.agentCancel = cancel
+	a.agentMu.Unlock()
+	a.publishAgentEvent("activity")
+	a.publishAgentEvent("board")
+
+	go func() {
+		runErr := a.runResolveConflicts(runCtx, baseURL, story, project, pipeline, defaultBranch)
+		message := fmt.Sprintf("Finished conflict resolution for %s", story.ID)
+		if runErr != nil {
+			if errors.Is(runErr, context.Canceled) {
+				message = "Conflict resolution stopped"
+			} else {
+				message = "Conflict resolution failed"
 			}
 		}
 		a.finishManualAgentWork(pipeline.QueueRunID, message, runErr)
@@ -3466,6 +3523,8 @@ func runKindTitle(kind string) string {
 		return "Implementer fix"
 	case RunKindCodexAddressFeedback:
 		return "Address review comments"
+	case RunKindCodexResolveConflicts:
+		return "Resolve merge conflicts"
 	default:
 		return "Implementer"
 	}
@@ -3709,6 +3768,10 @@ func eventTitle(eventType string) string {
 		return "Awaiting your review"
 	case eventAddressingFeedback:
 		return "Addressing feedback"
+	case eventResolvingConflicts:
+		return "Resolving conflicts"
+	case eventConflictsResolved:
+		return "Conflicts resolved"
 	case eventFeedbackAddressed:
 		return "Feedback addressed"
 	case eventFeedbackNoChanges:

@@ -160,6 +160,17 @@
         const help = panel.querySelector('[data-awaiting-help]');
         if (help) help.textContent = 'The agent is working on this story. Actions will unlock when it finishes.';
       }
+      // Close any open ⋯ menus so the busy state is obvious.
+      document.querySelectorAll('details.action-menu[open]').forEach((menu) => {
+        menu.open = false;
+      });
+    });
+
+    // Close action menus when clicking outside.
+    document.addEventListener('click', (event) => {
+      document.querySelectorAll('details.action-menu[open]').forEach((menu) => {
+        if (!menu.contains(event.target)) menu.open = false;
+      });
     });
 
     const runRoot = document.querySelector('[data-run-root]');

@@ -21,29 +21,33 @@ import (
 )
 
 const (
-	RunKindCodexImplement       = "codex_implement"
-	RunKindGrokReview           = "grok_review"
-	RunKindCodexFix             = "codex_fix"
-	RunKindCodexAddressFeedback = "codex_address_feedback"
+	RunKindCodexImplement          = "codex_implement"
+	RunKindGrokReview              = "grok_review"
+	RunKindCodexFix                = "codex_fix"
+	RunKindCodexAddressFeedback    = "codex_address_feedback"
+	RunKindCodexResolveConflicts   = "codex_resolve_conflicts"
 
 	feedbackFingerprintPrefix = "feedback_fingerprint:"
 	eventAwaitingHumanReview  = "awaiting_human_review"
 	eventAddressingFeedback   = "addressing_feedback"
 	eventFeedbackAddressed    = "feedback_addressed"
 	eventFeedbackNoChanges    = "feedback_no_changes"
+	eventResolvingConflicts   = "resolving_conflicts"
+	eventConflictsResolved    = "conflicts_resolved"
 
-	PipelinePhasePreflight       = "preflight"
-	PipelinePhaseBranching       = "branching"
-	PipelinePhaseImplement       = "implementing"
-	PipelinePhasePush            = "pushing"
-	PipelinePhaseCreatePR        = "creating_pr"
-	PipelinePhaseReview          = "reviewing"
-	PipelinePhaseFix             = "fixing"
-	PipelinePhaseQualityGate     = "quality_gate"
-	PipelinePhaseMerge           = "merging"
-	PipelinePhaseAwaitingHuman   = "awaiting_human"
-	PipelinePhaseAddressFeedback = "addressing_feedback"
-	PipelinePhaseCompleted       = "completed"
+	PipelinePhasePreflight         = "preflight"
+	PipelinePhaseBranching         = "branching"
+	PipelinePhaseImplement         = "implementing"
+	PipelinePhasePush              = "pushing"
+	PipelinePhaseCreatePR          = "creating_pr"
+	PipelinePhaseReview            = "reviewing"
+	PipelinePhaseFix               = "fixing"
+	PipelinePhaseQualityGate       = "quality_gate"
+	PipelinePhaseMerge             = "merging"
+	PipelinePhaseAwaitingHuman     = "awaiting_human"
+	PipelinePhaseAddressFeedback   = "addressing_feedback"
+	PipelinePhaseResolveConflicts  = "resolving_conflicts"
+	PipelinePhaseCompleted         = "completed"
 )
 
 // pipelineResult is the successful outcome of runStoryPipeline.
@@ -156,6 +160,14 @@ func gitPreflight(ctx context.Context, dir string, defaultBranchOverride string)
 			return "", err
 		}
 	}
+	// Always refresh from origin so feature branches are cut from current main/master,
+	// not a stale local copy left behind by earlier PR merges.
+	if err := gitFetchOrigin(ctx, dir); err != nil {
+		return "", err
+	}
+	if err := gitUpdateLocalBranchFromOrigin(ctx, dir, defaultBranch); err != nil {
+		return "", err
+	}
 	current, _, err := runCommand(ctx, dir, "git", "branch", "--show-current")
 	if err != nil {
 		return "", err
@@ -171,6 +183,131 @@ func gitPreflight(ctx context.Context, dir string, defaultBranchOverride string)
 		}
 	}
 	return defaultBranch, nil
+}
+
+func gitFetchOrigin(ctx context.Context, dir string) error {
+	// Skip when there is no origin remote (local-only / test repos).
+	if _, _, err := runCommand(ctx, dir, "git", "remote", "get-url", "origin"); err != nil {
+		return nil
+	}
+	if _, stderr, err := runCommand(ctx, dir, "git", "fetch", "origin"); err != nil {
+		detail := strings.TrimSpace(stderr)
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("git fetch origin failed: %s", detail)
+	}
+	return nil
+}
+
+// gitUpdateLocalBranchFromOrigin fast-forwards local defaultBranch to origin/defaultBranch.
+func gitUpdateLocalBranchFromOrigin(ctx context.Context, dir, branch string) error {
+	remoteRef := "origin/" + branch
+	if _, _, err := runCommand(ctx, dir, "git", "rev-parse", "--verify", remoteRef); err != nil {
+		// No remote tracking ref yet (offline / first clone without origin) — keep local branch.
+		return nil
+	}
+	if _, stderr, err := runCommand(ctx, dir, "git", "checkout", branch); err != nil {
+		detail := strings.TrimSpace(stderr)
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("checkout %s failed: %s", branch, detail)
+	}
+	if _, stderr, err := runCommand(ctx, dir, "git", "merge", "--ff-only", remoteRef); err != nil {
+		// Fall back to hard reset when local main diverged (common after GitHub-side merges).
+		if _, stderr2, err2 := runCommand(ctx, dir, "git", "reset", "--hard", remoteRef); err2 != nil {
+			detail := strings.TrimSpace(stderr2)
+			if detail == "" {
+				detail = strings.TrimSpace(stderr)
+			}
+			if detail == "" {
+				detail = err2.Error()
+			}
+			return fmt.Errorf("update %s from %s failed: %s", branch, remoteRef, detail)
+		}
+	}
+	return nil
+}
+
+func gitHasUnresolvedConflicts(ctx context.Context, dir string) (bool, error) {
+	stdout, _, err := runCommand(ctx, dir, "git", "ls-files", "-u")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(stdout) != "", nil
+}
+
+func gitMergeInProgress(ctx context.Context, dir string) bool {
+	// MERGE_HEAD exists while a merge is unfinished.
+	if _, _, err := runCommand(ctx, dir, "git", "rev-parse", "-q", "--verify", "MERGE_HEAD"); err == nil {
+		return true
+	}
+	return false
+}
+
+// gitMergeBaseIntoFeature merges origin/defaultBranch into featureBranch.
+// Returns hadConflicts=true when the merge stopped with unresolved paths (agent should fix).
+func gitMergeBaseIntoFeature(ctx context.Context, dir, featureBranch, defaultBranch string) (hadConflicts bool, err error) {
+	if err := gitFetchOrigin(ctx, dir); err != nil {
+		return false, err
+	}
+	if err := gitCheckoutBranch(ctx, dir, featureBranch); err != nil {
+		return false, err
+	}
+	// Ensure we have the latest pushed feature tip when the branch tracks origin.
+	remoteFeature := "origin/" + featureBranch
+	if _, _, revErr := runCommand(ctx, dir, "git", "rev-parse", "--verify", remoteFeature); revErr == nil {
+		_, _, _ = runCommand(ctx, dir, "git", "merge", "--ff-only", remoteFeature)
+	}
+	remoteBase := "origin/" + defaultBranch
+	if _, _, revErr := runCommand(ctx, dir, "git", "rev-parse", "--verify", remoteBase); revErr != nil {
+		// Fall back to local default branch if remote is missing.
+		remoteBase = defaultBranch
+	}
+	_, stderr, mergeErr := runCommand(ctx, dir, "git", "merge", "--no-edit", remoteBase)
+	if mergeErr == nil {
+		return false, nil
+	}
+	conflicts, confErr := gitHasUnresolvedConflicts(ctx, dir)
+	if confErr != nil {
+		return false, confErr
+	}
+	if conflicts {
+		return true, nil
+	}
+	detail := strings.TrimSpace(stderr)
+	if detail == "" {
+		detail = mergeErr.Error()
+	}
+	return false, fmt.Errorf("merge %s into %s failed: %s", remoteBase, featureBranch, detail)
+}
+
+func gitCompleteMergeCommit(ctx context.Context, dir, message string) error {
+	if _, stderr, err := runCommand(ctx, dir, "git", "add", "-A"); err != nil {
+		detail := strings.TrimSpace(stderr)
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("git add failed: %s", detail)
+	}
+	if gitMergeInProgress(ctx, dir) {
+		if _, stderr, err := runCommand(ctx, dir, "git", "commit", "--no-edit", "-m", message); err != nil {
+			// --no-edit may fail if no MERGE_MSG; retry with explicit message only.
+			if _, stderr2, err2 := runCommand(ctx, dir, "git", "commit", "-m", message); err2 != nil {
+				detail := strings.TrimSpace(stderr2)
+				if detail == "" {
+					detail = strings.TrimSpace(stderr)
+				}
+				if detail == "" {
+					detail = err2.Error()
+				}
+				return fmt.Errorf("git commit (merge) failed: %s", detail)
+			}
+		}
+		return nil
+	}
+	return gitCommitAll(ctx, dir, message)
 }
 
 func detectDefaultBranch(ctx context.Context, dir string) (string, error) {
@@ -1318,6 +1455,177 @@ func (a *App) completeAddressFeedback(ctx context.Context, story Story, pipeline
 		if err := a.addEvent(ctx, story.ID, eventFeedbackNoChanges, msg); err != nil {
 			return err
 		}
+	}
+	a.publishAgentEvent("board")
+	return nil
+}
+
+func buildCodexResolveConflictsPrompt(baseURL, botDocs string, project Project, story Story, branch, defaultBranch string, prNumber int, prURL string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "You are being run by Ripple to resolve merge conflicts on a supervised story.\n\n")
+	fmt.Fprintf(&b, "# Situation\n\n")
+	fmt.Fprintf(&b, "- Feature branch `%s` is in conflict with `%s` (the PR base).\n", branch, defaultBranch)
+	fmt.Fprintf(&b, "- Ripple already ran `git merge` of the latest `%s` into this branch. Conflict markers are in the working tree.\n", defaultBranch)
+	if prNumber > 0 {
+		fmt.Fprintf(&b, "- Pull request: #%d %s\n", prNumber, prURL)
+	}
+	fmt.Fprintf(&b, "\n# Working Rules\n\n")
+	fmt.Fprintf(&b, "- Stay on branch `%s`. Do not create or rename branches. Do not push. Do not merge the PR.\n", branch)
+	fmt.Fprintf(&b, "- Open every conflicted file and resolve all `<<<<<<<`, `=======`, `>>>>>>>` markers.\n")
+	fmt.Fprintf(&b, "- Keep the story's intended behavior while integrating the latest changes from `%s`.\n", defaultBranch)
+	fmt.Fprintf(&b, "- Prefer preserving both sides when they do not truly conflict; never leave conflict markers in the tree.\n")
+	fmt.Fprintf(&b, "- Run relevant tests/lint when practical. Do not start long-running servers.\n")
+	fmt.Fprintf(&b, "- Leave resolved files as local changes. Ripple will stage, commit the merge, and push.\n")
+	fmt.Fprintf(&b, "- If you cannot resolve a conflict safely, explain why in your final response and leave the tree as far along as possible.\n\n")
+	fmt.Fprintf(&b, "# Ripple API\n\nBase URL: %s\n\nBot docs:\n\n%s\n\n", baseURL, botDocs)
+	fmt.Fprintf(&b, "# Project\n\nName: %s\nWorking directory: %s\n\n", project.Name, project.WorkingDirectory)
+	fmt.Fprintf(&b, "# Story\n\nID: %s\nTitle: %s\n\nDescription:\n%s\n", story.ID, story.Title, story.Description)
+	return b.String()
+}
+
+// prepareResolveConflicts validates a supervised story can attempt conflict resolution.
+func (a *App) prepareResolveConflicts(ctx context.Context, storyID string) (Story, Project, StoryPipeline, string, error) {
+	story, err := a.getStory(ctx, storyID)
+	if err != nil {
+		return Story{}, Project{}, StoryPipeline{}, "", err
+	}
+	if story.Status != StatusInReview {
+		return Story{}, Project{}, StoryPipeline{}, "", badRequest("Only stories in review can fix merge conflicts")
+	}
+	project, err := a.getProject(ctx, story.ProjectID)
+	if err != nil {
+		return Story{}, Project{}, StoryPipeline{}, "", err
+	}
+	if strings.TrimSpace(project.WorkingDirectory) == "" {
+		return Story{}, Project{}, StoryPipeline{}, "", badRequest("Set the project working directory before fixing conflicts")
+	}
+	pipeline, err := a.getLatestStoryPipeline(ctx, story.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Story{}, Project{}, StoryPipeline{}, "", badRequest("No pipeline/PR found for this story. Run the supervised queue first.")
+		}
+		return Story{}, Project{}, StoryPipeline{}, "", err
+	}
+	if pipeline.PRNumber <= 0 || strings.TrimSpace(pipeline.PRURL) == "" {
+		return Story{}, Project{}, StoryPipeline{}, "", badRequest("This story does not have a pull request to fix conflicts on")
+	}
+	if strings.TrimSpace(pipeline.Branch) == "" {
+		return Story{}, Project{}, StoryPipeline{}, "", badRequest("This story is missing its feature branch on the pipeline record")
+	}
+	defaultBranch := strings.TrimSpace(pipeline.DefaultBranch)
+	if defaultBranch == "" {
+		if db, dbErr := project.resolveDefaultBranch(ctx, project.WorkingDirectory); dbErr == nil {
+			defaultBranch = db
+		} else {
+			defaultBranch = "main"
+		}
+	}
+	return story, project, pipeline, defaultBranch, nil
+}
+
+// runResolveConflicts merges the latest base into the feature branch and, if needed,
+// runs the implementer to resolve conflict markers. Always returns the story to in_review.
+func (a *App) runResolveConflicts(ctx context.Context, baseURL string, story Story, project Project, pipeline StoryPipeline, defaultBranch string) error {
+	failBack := func(err error, eventMsg string) error {
+		pipeline.Error = err.Error()
+		_ = a.upsertStoryPipeline(ctx, pipeline)
+		_ = a.changeStoryStatus(ctx, story.ID, StatusInReview, false, "Returned to review after conflict resolution error")
+		if eventMsg != "" {
+			_ = a.addEvent(ctx, story.ID, "agent_failed", eventMsg)
+		}
+		a.publishAgentEvent("board")
+		return err
+	}
+
+	if err := a.changeStoryStatus(ctx, story.ID, StatusInProgress, false, "Resolving merge conflicts"); err != nil {
+		return err
+	}
+	pipeline.Phase = PipelinePhaseResolveConflicts
+	pipeline.Error = ""
+	pipeline.DefaultBranch = defaultBranch
+	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
+		return err
+	}
+	if err := a.addEvent(ctx, story.ID, eventResolvingConflicts, fmt.Sprintf("Merging latest %s into %s to fix conflicts for PR #%d", defaultBranch, pipeline.Branch, pipeline.PRNumber)); err != nil {
+		return err
+	}
+	a.publishAgentEvent("board")
+	a.updateAgentProgress(story.ID, fmt.Sprintf("Resolving conflicts for %s", story.ID), 0, 1)
+
+	dir := project.WorkingDirectory
+	hadConflicts, err := gitMergeBaseIntoFeature(ctx, dir, pipeline.Branch, defaultBranch)
+	if err != nil {
+		return failBack(err, "Conflict merge failed: "+err.Error())
+	}
+
+	if !hadConflicts {
+		// Clean merge (or already up to date). Push if the merge created a commit / tree moved.
+		dirty, dirtyErr := gitWorkingTreeDirty(ctx, dir)
+		if dirtyErr != nil {
+			return failBack(dirtyErr, "Conflict check failed: "+dirtyErr.Error())
+		}
+		if dirty || gitMergeInProgress(ctx, dir) {
+			if err := gitCompleteMergeCommit(ctx, dir, fmt.Sprintf("%s: merge %s", story.ID, defaultBranch)); err != nil {
+				return failBack(err, "Conflict merge commit failed: "+err.Error())
+			}
+		}
+		if err := gitPushBranch(ctx, dir, pipeline.Branch); err != nil {
+			// Push may no-op if nothing new; still surface real errors.
+			return failBack(err, "Push after clean conflict merge failed: "+err.Error())
+		}
+		return a.completeResolveConflicts(ctx, story, pipeline, false, fmt.Sprintf("Merged latest %s without conflicts", defaultBranch))
+	}
+
+	docs, err := embeddedFiles.ReadFile("docs/bot-api.md")
+	if err != nil {
+		return failBack(err, "Conflict resolution failed: "+err.Error())
+	}
+	prompt := buildCodexResolveConflictsPrompt(baseURL, string(docs), project, story, pipeline.Branch, defaultBranch, pipeline.PRNumber, pipeline.PRURL)
+	finalMessage, err := a.runCodexForStoryWithKind(ctx, pipeline.QueueRunID, baseURL, project, story, prompt, RunKindCodexResolveConflicts, pipeline.Branch, pipeline.PRNumber, pipeline.PRURL)
+	if err != nil {
+		return failBack(err, "Conflict resolution agent failed: "+err.Error())
+	}
+
+	stillConflicted, confErr := gitHasUnresolvedConflicts(ctx, dir)
+	if confErr != nil {
+		return failBack(confErr, "Conflict check failed: "+confErr.Error())
+	}
+	if stillConflicted {
+		return failBack(errors.New("unresolved conflict markers remain after the agent pass"), "Conflict resolution incomplete: unresolved markers remain")
+	}
+
+	if err := gitCompleteMergeCommit(ctx, dir, fmt.Sprintf("%s: resolve merge conflicts with %s", story.ID, defaultBranch)); err != nil {
+		return failBack(err, "Conflict commit failed: "+err.Error())
+	}
+	if err := gitPushBranch(ctx, dir, pipeline.Branch); err != nil {
+		return failBack(err, "Push after conflict resolution failed: "+err.Error())
+	}
+	msg := strings.TrimSpace(finalMessage)
+	if msg == "" {
+		msg = fmt.Sprintf("Resolved conflicts with %s and pushed", defaultBranch)
+	}
+	return a.completeResolveConflicts(ctx, story, pipeline, true, msg)
+}
+
+func (a *App) completeResolveConflicts(ctx context.Context, story Story, pipeline StoryPipeline, agentResolved bool, message string) error {
+	pipeline.Phase = PipelinePhaseAwaitingHuman
+	pipeline.Error = ""
+	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
+		return err
+	}
+	if err := a.changeStoryStatus(ctx, story.ID, StatusInReview, false, "Awaiting human after conflict resolution"); err != nil {
+		return err
+	}
+	eventMsg := strings.TrimSpace(message)
+	if eventMsg == "" {
+		if agentResolved {
+			eventMsg = "Merge conflicts resolved and pushed; waiting for human again"
+		} else {
+			eventMsg = "Base branch merged cleanly; waiting for human again"
+		}
+	}
+	if err := a.addEvent(ctx, story.ID, eventConflictsResolved, eventMsg); err != nil {
+		return err
 	}
 	a.publishAgentEvent("board")
 	return nil

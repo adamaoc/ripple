@@ -85,15 +85,24 @@
                   <input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/runs/{{$.Run.Run.ID}}">
                   <button type="submit" class="secondary-button" data-busy-label="Merging pull request…" {{if $.Run.Agent.Running}}disabled{{end}}>Merge pull request</button>
                 </form>
-                <form method="post" action="/stories/{{.StoryID}}/sync-pr" data-current-redirect data-busy-submit class="supervised-action-form">
-                  <input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/runs/{{$.Run.Run.ID}}">
-                  <button type="submit" class="secondary-button" data-busy-label="Checking GitHub merge…" {{if $.Run.Agent.Running}}disabled{{end}}>I already merged on GitHub</button>
-                </form>
+                <details class="action-menu">
+                  <summary class="secondary-button action-menu-trigger" {{if $.Run.Agent.Running}}aria-disabled="true"{{end}} aria-label="More actions">⋯</summary>
+                  <div class="action-menu-panel" role="menu">
+                    <form method="post" action="/stories/{{.StoryID}}/resolve-conflicts" data-current-redirect data-busy-submit class="supervised-action-form">
+                      <input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/runs/{{$.Run.Run.ID}}">
+                      <button type="submit" role="menuitem" data-busy-label="Fixing merge conflicts…" {{if $.Run.Agent.Running}}disabled{{end}}>Fix merge conflicts</button>
+                    </form>
+                    <form method="post" action="/stories/{{.StoryID}}/sync-pr" data-current-redirect data-busy-submit class="supervised-action-form">
+                      <input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/runs/{{$.Run.Run.ID}}">
+                      <button type="submit" role="menuitem" data-busy-label="Checking GitHub merge…" {{if $.Run.Agent.Running}}disabled{{end}}>I already merged on GitHub</button>
+                    </form>
+                  </div>
+                </details>
               </div>
               <p class="muted settings-help">
                 <strong>Act on review comments</strong> — agent reads the latest PR feedback and pushes fixes.<br>
                 <strong>Merge pull request</strong> — Ripple runs checks, merges on GitHub, and marks the story done.<br>
-                <strong>I already merged on GitHub</strong> — you merged in the GitHub UI; Ripple only checks that and marks the story done (does not merge again).
+                More actions (⋯): fix conflicts with main, or mark done if you already merged on GitHub.
               </p>
             </article>
             {{end}}
