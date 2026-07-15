@@ -86,14 +86,21 @@
 
     const modal = document.getElementById('story-modal');
     const folderModal = document.getElementById('folder-picker');
+    const createProjectModal = document.getElementById('create-project-modal');
     document.addEventListener('htmx:afterSwap', (event) => {
       if (event.detail.target?.id === 'story-modal-content' && modal && !modal.open) modal.showModal();
       if (event.detail.target?.id === 'folder-picker-content' && folderModal && !folderModal.open) folderModal.showModal();
     });
     document.querySelector('[data-modal-close]')?.addEventListener('click', () => modal?.close());
     document.querySelector('[data-folder-picker-close]')?.addEventListener('click', () => folderModal?.close());
+    document.querySelector('[data-create-project-open]')?.addEventListener('click', () => {
+      createProjectModal?.showModal();
+      createProjectModal?.querySelector('input[name="name"]')?.focus();
+    });
+    document.querySelector('[data-create-project-close]')?.addEventListener('click', () => createProjectModal?.close());
     modal?.addEventListener('click', (event) => { if (event.target === modal) modal.close(); });
     folderModal?.addEventListener('click', (event) => { if (event.target === folderModal) folderModal.close(); });
+    createProjectModal?.addEventListener('click', (event) => { if (event.target === createProjectModal) createProjectModal.close(); });
     document.addEventListener('click', (event) => {
       const popup = document.querySelector('[data-close-story-popup]');
       if (event.target.closest('[data-close-story-open]')) {

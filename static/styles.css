@@ -193,8 +193,12 @@ label.checkbox-label {
   text-transform: none;
 }
 label.checkbox-label input { min-height: auto; width: auto; }
-.create-project-panel { margin-top: 18px; }
-.create-project-form { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; padding: 16px; }
+.create-project-modal { background: transparent; border: 0; max-height: 92vh; max-width: 560px; padding: 0; width: calc(100% - 32px); }
+.create-project-modal::backdrop { background: rgba(0,0,0,.58); }
+.create-project-modal-frame { max-height: 92vh; }
+.create-project-modal-heading { border-bottom: 1px solid var(--line); margin-bottom: 4px; padding: 0 40px 16px 0; }
+.create-project-modal-heading h2 { font-size: 22px; margin: 6px 0 0; }
+.create-project-form { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; padding: 8px 0 0; }
 .create-project-form label:nth-child(3),
 .create-project-form label:nth-child(4),
 .create-project-form .project-path-actions,

@@ -216,11 +216,17 @@ func TestUICreateProject(t *testing.T) {
 		t.Fatal("project not created")
 	}
 
-	// Dashboard shows create form
+	// Dashboard shows create project control + modal form
 	getRes := httptest.NewRecorder()
 	app.routes().ServeHTTP(getRes, httptest.NewRequest(http.MethodGet, "/", nil))
-	if !strings.Contains(getRes.Body.String(), `action="/projects"`) || !strings.Contains(getRes.Body.String(), "Create project") {
-		t.Fatal("dashboard missing create project form")
+	body := getRes.Body.String()
+	for _, marker := range []string{`action="/projects"`, "Create project", `id="create-project-modal"`, `data-create-project-open`} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("dashboard missing create project UI marker %q", marker)
+		}
+	}
+	if strings.Contains(body, "create-project-panel") {
+		t.Fatal("dashboard still has inline create project panel")
 	}
 }
 
