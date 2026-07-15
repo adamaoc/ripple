@@ -77,7 +77,7 @@ Content-Type: application/json
   "id": "txgarage",
   "name": "TXGarage",
   "prefix": "TXG",
-  "workingDirectory": "/Users/adamm/Documents/WEBPROJECTS/Sites and Apps/TXGarage",
+  "workingDirectory": "/path/to/txgarage",
   "autonomyMode": "autonomous",
   "defaultBranchOverride": "",
   "prBaseBranch": "",
@@ -131,7 +131,7 @@ Content-Type: application/json
 {
   "projectName": "Real View",
   "projectPrefix": "RV",
-  "workingDirectory": "/Users/adamm/Documents/WEBPROJECTS/Sites and Apps/RealView",
+  "workingDirectory": "/path/to/realview",
   "epicName": "Listing workflow",
   "title": "Show listing preview before publish",
   "description": "Render a Markdown-friendly preview of the listing before it goes live."

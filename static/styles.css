@@ -182,8 +182,17 @@ label { color: var(--muted); display: grid; font-size: 11px; font-weight: 700; g
 .settings-block { border-top: 1px solid var(--line); display: grid; gap: 10px; padding-top: 12px; }
 .settings-block:first-child { border-top: 0; padding-top: 0; }
 .settings-block h3, .settings-block h4 { font-size: 11px; letter-spacing: .08em; margin: 0; text-transform: uppercase; }
-.checkbox-label { align-items: center; display: flex !important; flex-direction: row !important; font-size: 12px; font-weight: 600; gap: 8px; letter-spacing: 0; text-transform: none; }
-.checkbox-label input { min-height: auto; width: auto; }
+label.checkbox-label {
+  align-items: center;
+  display: flex;
+  flex-direction: row;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 8px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+label.checkbox-label input { min-height: auto; width: auto; }
 .create-project-panel { margin-top: 18px; }
 .create-project-form { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; padding: 16px; }
 .create-project-form label:nth-child(3),
@@ -192,7 +201,7 @@ label { color: var(--muted); display: grid; font-size: 11px; font-weight: 700; g
 .create-project-form > p { grid-column: 1 / -1; }
 .project-path-actions { display: flex; gap: 7px; justify-content: flex-end; }
 .project-path-section form { display: grid; gap: 10px; }
-.project-path-section form label { display: grid; gap: 6px; }
+.project-path-section form label:not(.checkbox-label) { display: grid; gap: 6px; }
 .status-tabs { border: 1px solid var(--line); display: flex; margin-bottom: 12px; overflow-x: auto; }
 .status-tabs a { border-right: 1px solid var(--line); color: var(--muted); font-size: 12px; font-weight: 700; padding: 10px 13px; text-decoration: none; white-space: nowrap; }
 .status-tabs a.active { background: var(--surface); color: var(--text); }
@@ -237,7 +246,13 @@ label { color: var(--muted); display: grid; font-size: 11px; font-weight: 700; g
 .supervised-actions { display: grid; gap: 14px; }
 .supervised-actions h3 { color: var(--accent); }
 .supervised-actions > div p { color: var(--muted); margin: 0 0 8px; }
-.pr-link-row { align-items: baseline; display: flex; flex-wrap: wrap; gap: 10px; margin: 0 !important; }
+.supervised-actions > div p.pr-link-row {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0;
+}
 .pr-link-row a { font-weight: 700; }
 .supervised-action-forms { display: grid; gap: 16px; }
 .supervised-action-form { display: grid; gap: 8px; justify-items: start; }
