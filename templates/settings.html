@@ -8,9 +8,10 @@
     <nav class="settings-nav" aria-label="Settings sections">
       <a href="#appearance">Appearance</a>
       <a href="#agents" {{if .SettingsAgents.Saved}}class="active"{{end}}>Agents</a>
+      <a href="#github-identity" {{if .GitHubIdentity.Saved}}class="active"{{end}}>GitHub identity</a>
       <a href="#api-providers">API providers</a>
       <span>Path precedence: env override &gt; settings path &gt; auto-detect</span>
-      <span>API keys are stored in the local SQLite database (not encrypted at rest). Never shared in transcripts.</span>
+      <span>API keys and bot tokens are stored in the local SQLite database (not encrypted at rest).</span>
     </nav>
     <div class="settings-content">
       <section id="appearance" class="lined-panel settings-section">
@@ -99,6 +100,84 @@
             {{end}}
           </ul>
         </div>
+      </section>
+
+      <section id="github-identity" class="lined-panel settings-section">
+        <header>
+          <div>
+            <span class="eyebrow">Attribution</span>
+            <h2>GitHub identity</h2>
+            <p>Control who GitHub shows for PRs, commits, and agent review comments. Hybrid is the default: you open PRs, Ripple authors commits (with you as co-author), comments stay as you until a bot token is set.</p>
+          </div>
+          {{if .GitHubIdentity.Saved}}<span class="current-setting settings-flash">Saved</span>{{end}}
+        </header>
+        {{if .GitHubIdentity.NeedsBotToken}}
+        <p class="inline-notice error">Bot token required: PR author or agent comments are set to Ripple bot, but no token is saved yet.</p>
+        {{end}}
+        <form class="agents-settings-form" method="post" action="/settings/github-identity">
+          <div class="agents-role-grid">
+            <label>
+              Pull request author
+              <select name="prAuthorMode">
+                <option value="me" {{if eq .GitHubIdentity.PRAuthorMode "me"}}selected{{end}}>Me (current gh login)</option>
+                <option value="bot" {{if eq .GitHubIdentity.PRAuthorMode "bot"}}selected{{end}}>Ripple bot (bot token)</option>
+              </select>
+              <small class="settings-help">Who opens PRs with <code>gh pr create</code>.</small>
+            </label>
+            <label>
+              Agent review comments
+              <select name="commentMode">
+                <option value="me" {{if eq .GitHubIdentity.CommentMode "me"}}selected{{end}}>Me (current gh login)</option>
+                <option value="bot" {{if eq .GitHubIdentity.CommentMode "bot"}}selected{{end}}>Ripple bot (bot token)</option>
+              </select>
+              <small class="settings-help">Who posts the automated agent review on the PR.</small>
+            </label>
+          </div>
+          <div class="agents-paths">
+            <h3>Commits</h3>
+            <label>
+              Commit attribution
+              <select name="commitMode">
+                <option value="me" {{if eq .GitHubIdentity.CommitMode "me"}}selected{{end}}>Me (repo git user.name / user.email)</option>
+                <option value="ripple" {{if eq .GitHubIdentity.CommitMode "ripple"}}selected{{end}}>Ripple only</option>
+                <option value="ripple_coauthor" {{if eq .GitHubIdentity.CommitMode "ripple_coauthor"}}selected{{end}}>Ripple + Co-authored-by me (recommended)</option>
+              </select>
+              <small class="settings-help">Sets <code>GIT_AUTHOR_*</code> on commits Ripple makes. Merge commits use the same rules.</small>
+            </label>
+            <div class="agents-role-grid">
+              <label>
+                Ripple commit name
+                <input name="commitName" value="{{.GitHubIdentity.CommitName}}" placeholder="Ripple" autocomplete="off">
+              </label>
+              <label>
+                Ripple commit email
+                <input name="commitEmail" value="{{.GitHubIdentity.CommitEmail}}" placeholder="ripple[bot]@users.noreply.github.com" autocomplete="off">
+              </label>
+              <label>
+                Co-author name (optional)
+                <input name="humanName" value="{{.GitHubIdentity.HumanName}}" placeholder="From git config user.name if blank" autocomplete="off">
+              </label>
+              <label>
+                Co-author email (optional)
+                <input name="humanEmail" value="{{.GitHubIdentity.HumanEmail}}" placeholder="From git config user.email if blank" autocomplete="off">
+              </label>
+            </div>
+          </div>
+          <div class="agents-paths">
+            <h3>Ripple bot credentials</h3>
+            <p class="settings-help">Required only when PR author or comments use “Ripple bot”. Use a fine-scoped PAT for a bot machine user (or App token). Leave blank to keep the saved token.</p>
+            <label>
+              Bot token
+              <input name="botToken" type="password" value="" placeholder="{{if .GitHubIdentity.HasBotToken}}{{.GitHubIdentity.MaskedToken}} — leave blank to keep{{else}}ghp_…{{end}}" autocomplete="off">
+            </label>
+            {{if .GitHubIdentity.HasBotToken}}
+            <label class="checkbox-label"><input type="checkbox" name="clearBotToken" value="1"> Clear saved bot token</label>
+            {{end}}
+          </div>
+          <div class="agents-form-actions">
+            <button type="submit">Save GitHub identity</button>
+          </div>
+        </form>
       </section>
 
       <section id="api-providers" class="lined-panel settings-section">

@@ -401,7 +401,7 @@ func TestGitCompleteMergeAfterAgentRewroteFileWithoutStaging(t *testing.T) {
 	}
 
 	// Old bug: treating unmerged index as failure. New path: complete merge after staging.
-	if err := gitCompleteMergeCommit(t.Context(), dir, "resolve"); err != nil {
+	if err := gitCompleteMergeCommit(t.Context(), dir, "resolve", defaultGitHubIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	if gitMergeInProgress(t.Context(), dir) {

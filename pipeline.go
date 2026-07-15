@@ -126,9 +126,16 @@ func resolveGhBinary() (string, error) {
 }
 
 func runCommand(ctx context.Context, dir string, name string, args ...string) (string, string, error) {
+	return runCommandEnv(ctx, dir, nil, name, args...)
+}
+
+func runCommandEnv(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, error) {
 	cmd := osexec.CommandContext(ctx, name, args...)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if len(env) > 0 {
+		cmd.Env = env
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -356,7 +363,7 @@ func gitMergeBaseIntoFeature(ctx context.Context, dir, featureBranch, defaultBra
 	return false, fmt.Errorf("merge %s into %s failed: %s", remoteBase, featureBranch, detail)
 }
 
-func gitCompleteMergeCommit(ctx context.Context, dir, message string) error {
+func gitCompleteMergeCommit(ctx context.Context, dir, message string, id GitHubIdentityConfig) error {
 	if _, stderr, err := runCommand(ctx, dir, "git", "add", "-A"); err != nil {
 		detail := strings.TrimSpace(stderr)
 		if detail == "" {
@@ -369,10 +376,12 @@ func gitCompleteMergeCommit(ctx context.Context, dir, message string) error {
 	} else if still {
 		return errors.New("unmerged paths remain after staging; conflict markers may still be present")
 	}
+	message = id.decorateCommitMessage(ctx, dir, message)
+	env := mergeEnv(id.commitEnv(ctx, dir))
 	if gitMergeInProgress(ctx, dir) {
-		if _, stderr, err := runCommand(ctx, dir, "git", "commit", "--no-edit", "-m", message); err != nil {
+		if _, stderr, err := runCommandEnv(ctx, dir, env, "git", "commit", "--no-edit", "-m", message); err != nil {
 			// --no-edit may fail if no MERGE_MSG; retry with explicit message only.
-			if _, stderr2, err2 := runCommand(ctx, dir, "git", "commit", "-m", message); err2 != nil {
+			if _, stderr2, err2 := runCommandEnv(ctx, dir, env, "git", "commit", "-m", message); err2 != nil {
 				detail := strings.TrimSpace(stderr2)
 				if detail == "" {
 					detail = strings.TrimSpace(stderr)
@@ -385,7 +394,7 @@ func gitCompleteMergeCommit(ctx context.Context, dir, message string) error {
 		}
 		return nil
 	}
-	return gitCommitAll(ctx, dir, message)
+	return gitCommitAll(ctx, dir, message, id)
 }
 
 func detectDefaultBranch(ctx context.Context, dir string) (string, error) {
@@ -425,7 +434,7 @@ func gitCreateFeatureBranch(ctx context.Context, dir, defaultBranch, branch stri
 	return nil
 }
 
-func gitCommitAll(ctx context.Context, dir, message string) error {
+func gitCommitAll(ctx context.Context, dir, message string, id GitHubIdentityConfig) error {
 	status, _, err := runCommand(ctx, dir, "git", "status", "--porcelain")
 	if err != nil {
 		return err
@@ -440,7 +449,9 @@ func gitCommitAll(ctx context.Context, dir, message string) error {
 		}
 		return fmt.Errorf("git add failed: %s", detail)
 	}
-	if _, stderr, err := runCommand(ctx, dir, "git", "commit", "-m", message); err != nil {
+	message = id.decorateCommitMessage(ctx, dir, message)
+	env := mergeEnv(id.commitEnv(ctx, dir))
+	if _, stderr, err := runCommandEnv(ctx, dir, env, "git", "commit", "-m", message); err != nil {
 		detail := strings.TrimSpace(stderr)
 		if detail == "" {
 			detail = err.Error()
@@ -492,8 +503,12 @@ func gitDeleteLocalBranch(ctx context.Context, dir, branch, defaultBranch string
 	return nil
 }
 
-func ghCreatePR(ctx context.Context, ghBin, dir, baseBranch, headBranch, title, body string) (int, string, error) {
-	stdout, stderr, err := runCommand(ctx, dir, ghBin, "pr", "create",
+func ghCreatePR(ctx context.Context, ghBin, dir, baseBranch, headBranch, title, body string, id GitHubIdentityConfig) (int, string, error) {
+	if err := id.validateBotFor(id.PRAuthorMode, "open pull requests"); err != nil {
+		return 0, "", err
+	}
+	env := mergeEnv(id.ghEnvFor(id.PRAuthorMode))
+	stdout, stderr, err := runCommandEnv(ctx, dir, env, ghBin, "pr", "create",
 		"--base", baseBranch,
 		"--head", headBranch,
 		"--title", title,
@@ -549,8 +564,12 @@ func ghPRDiff(ctx context.Context, ghBin, dir string, prNumber int) (string, err
 	return stdout, nil
 }
 
-func ghPRComment(ctx context.Context, ghBin, dir string, prNumber int, body string) error {
-	_, stderr, err := runCommand(ctx, dir, ghBin, "pr", "comment", fmt.Sprintf("%d", prNumber), "--body", body)
+func ghPRComment(ctx context.Context, ghBin, dir string, prNumber int, body string, id GitHubIdentityConfig) error {
+	if err := id.validateBotFor(id.CommentMode, "post agent review comments"); err != nil {
+		return err
+	}
+	env := mergeEnv(id.ghEnvFor(id.CommentMode))
+	_, stderr, err := runCommandEnv(ctx, dir, env, ghBin, "pr", "comment", fmt.Sprintf("%d", prNumber), "--body", body)
 	if err != nil {
 		detail := strings.TrimSpace(stderr)
 		if detail == "" {
@@ -1180,6 +1199,10 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	if err != nil {
 		return pipelineResult{}, err
 	}
+	identity, err := a.getGitHubIdentity(ctx)
+	if err != nil {
+		return pipelineResult{}, err
+	}
 	dir := pc.Project.WorkingDirectory
 	pipeline := StoryPipeline{
 		QueueRunID: pc.QueueRunID,
@@ -1229,7 +1252,7 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 
 	pipeline.Phase = PipelinePhasePush
 	_ = a.upsertStoryPipeline(ctx, pipeline)
-	if err := gitCommitAll(ctx, dir, fmt.Sprintf("%s: %s", pc.Story.ID, pc.Story.Title)); err != nil {
+	if err := gitCommitAll(ctx, dir, fmt.Sprintf("%s: %s", pc.Story.ID, pc.Story.Title), identity); err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
 		return pipelineResult{}, err
@@ -1257,7 +1280,7 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	prTitle := fmt.Sprintf("%s: %s", pc.Story.ID, pc.Story.Title)
 	prBody := fmt.Sprintf("Automated PR for story **%s**.\n\n## Description\n\n%s", pc.Story.ID, pc.Story.Description)
 	prBase := pc.Project.resolvePRBaseBranch(defaultBranch)
-	prNumber, prURL, err := ghCreatePR(ctx, ghBin, dir, prBase, branch, prTitle, prBody)
+	prNumber, prURL, err := ghCreatePR(ctx, ghBin, dir, prBase, branch, prTitle, prBody, identity)
 	if err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
@@ -1292,7 +1315,7 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 	reviewJSON, _ := json.Marshal(review)
 	pipeline.ReviewJSON = string(reviewJSON)
 	_ = a.upsertStoryPipeline(ctx, pipeline)
-	if err := ghPRComment(ctx, ghBin, dir, prNumber, formatReviewForPR(review)); err != nil {
+	if err := ghPRComment(ctx, ghBin, dir, prNumber, formatReviewForPR(review), identity); err != nil {
 		pipeline.Error = err.Error()
 		_ = a.upsertStoryPipeline(ctx, pipeline)
 		return pipelineResult{}, err
@@ -1312,7 +1335,7 @@ func (a *App) runStoryPipeline(ctx context.Context, pc pipelineContext, previous
 			_ = a.upsertStoryPipeline(ctx, pipeline)
 			return pipelineResult{}, err
 		}
-		if err := gitCommitAll(ctx, dir, fmt.Sprintf("%s: address review feedback", pc.Story.ID)); err != nil {
+		if err := gitCommitAll(ctx, dir, fmt.Sprintf("%s: address review feedback", pc.Story.ID), identity); err != nil {
 			pipeline.Error = err.Error()
 			_ = a.upsertStoryPipeline(ctx, pipeline)
 			return pipelineResult{}, err
@@ -1460,6 +1483,10 @@ func (a *App) runAddressFeedback(ctx context.Context, baseURL string, story Stor
 	a.publishAgentEvent("board")
 	a.updateAgentProgress(story.ID, fmt.Sprintf("Addressing feedback for %s", story.ID), 0, 1)
 
+	identity, err := a.getGitHubIdentity(ctx)
+	if err != nil {
+		return err
+	}
 	dir := project.WorkingDirectory
 	if err := gitCheckoutBranch(ctx, dir, pipeline.Branch); err != nil {
 		pipeline.Error = err.Error()
@@ -1492,7 +1519,7 @@ func (a *App) runAddressFeedback(ctx context.Context, baseURL string, story Stor
 	}
 	committed := false
 	if dirty {
-		if err := gitCommitAll(ctx, dir, fmt.Sprintf("%s: address review comments", story.ID)); err != nil {
+		if err := gitCommitAll(ctx, dir, fmt.Sprintf("%s: address review comments", story.ID), identity); err != nil {
 			pipeline.Error = err.Error()
 			_ = a.upsertStoryPipeline(ctx, pipeline)
 			_ = a.changeStoryStatus(ctx, story.ID, StatusInReview, false, "Returned to review after address-feedback error")
@@ -1630,6 +1657,10 @@ func (a *App) runResolveConflicts(ctx context.Context, baseURL string, story Sto
 	a.publishAgentEvent("board")
 	a.updateAgentProgress(story.ID, fmt.Sprintf("Resolving conflicts for %s", story.ID), 0, 1)
 
+	identity, idErr := a.getGitHubIdentity(ctx)
+	if idErr != nil {
+		return failBack(idErr, "Conflict resolution failed: "+idErr.Error())
+	}
 	dir := project.WorkingDirectory
 	hadConflicts, err := gitMergeBaseIntoFeature(ctx, dir, pipeline.Branch, defaultBranch)
 	if err != nil {
@@ -1642,7 +1673,7 @@ func (a *App) runResolveConflicts(ctx context.Context, baseURL string, story Sto
 			return failBack(dirtyErr, "Conflict check failed: "+dirtyErr.Error())
 		}
 		if dirty || gitMergeInProgress(ctx, dir) {
-			if err := gitCompleteMergeCommit(ctx, dir, fmt.Sprintf("%s: resolve merge conflicts with %s", story.ID, defaultBranch)); err != nil {
+			if err := gitCompleteMergeCommit(ctx, dir, fmt.Sprintf("%s: resolve merge conflicts with %s", story.ID, defaultBranch), identity); err != nil {
 				return failBack(err, "Conflict commit failed: "+err.Error())
 			}
 		}

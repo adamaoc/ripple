@@ -259,17 +259,18 @@ type AgentLogItem struct {
 }
 
 type PageData struct {
-	Page           string
-	Projects       []Project
-	Project        Project
-	Dashboard      DashboardData
-	Backlog        BacklogPageData
-	Run            RunPageData
-	HasDetailStory bool
-	Detail         StoryPanelData
-	CurrentAgent   AgentStatus
-	ActiveRun      QueueRunSummary
-	SettingsAgents SettingsAgentsData
+	Page             string
+	Projects         []Project
+	Project          Project
+	Dashboard        DashboardData
+	Backlog          BacklogPageData
+	Run              RunPageData
+	HasDetailStory   bool
+	Detail           StoryPanelData
+	CurrentAgent     AgentStatus
+	ActiveRun        QueueRunSummary
+	SettingsAgents   SettingsAgentsData
+	GitHubIdentity   GitHubIdentityView
 }
 
 type BacklogPageData struct {
@@ -408,6 +409,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /about", a.handleAbout)
 	mux.HandleFunc("GET /settings", a.handleSettings)
 	mux.HandleFunc("POST /settings/agents", a.handleUIAgentSettings)
+	mux.HandleFunc("POST /settings/github-identity", a.handleUIGitHubIdentity)
 	mux.HandleFunc("POST /settings/agents/api-providers", a.handleUICreateAPIProvider)
 	mux.HandleFunc("POST /settings/agents/api-providers/{id}", a.handleUIUpdateAPIProvider)
 	mux.HandleFunc("POST /settings/agents/api-providers/{id}/delete", a.handleUIDeleteAPIProvider)
@@ -479,11 +481,17 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
+	ghIdentity, err := a.githubIdentityView(r.Context(), flash)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
 	a.render(w, "layout.html", PageData{
 		Page:           "settings",
 		Projects:       projects,
 		CurrentAgent:   a.currentAgentStatus(),
 		SettingsAgents: agents,
+		GitHubIdentity: ghIdentity,
 	})
 }
 
@@ -503,6 +511,29 @@ func (a *App) handleUIAgentSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/settings?flash=saved#agents", http.StatusSeeOther)
+}
+
+func (a *App) handleUIGitHubIdentity(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		httpError(w, err)
+		return
+	}
+	form := map[string]string{
+		"prAuthorMode":  r.FormValue("prAuthorMode"),
+		"commitMode":    r.FormValue("commitMode"),
+		"commentMode":   r.FormValue("commentMode"),
+		"commitName":    r.FormValue("commitName"),
+		"commitEmail":   r.FormValue("commitEmail"),
+		"humanName":     r.FormValue("humanName"),
+		"humanEmail":    r.FormValue("humanEmail"),
+		"botToken":      r.FormValue("botToken"),
+		"clearBotToken": r.FormValue("clearBotToken"),
+	}
+	if err := a.saveGitHubIdentityFromForm(r.Context(), form); err != nil {
+		httpError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/settings?flash=github_saved#github-identity", http.StatusSeeOther)
 }
 
 func (a *App) handleUICreateAPIProvider(w http.ResponseWriter, r *http.Request) {
@@ -959,6 +990,9 @@ func (a *App) migrate(ctx context.Context) error {
 		}
 	}
 	if err := a.ensureAgentSettings(ctx); err != nil {
+		return err
+	}
+	if err := a.ensureGitHubIdentityColumn(ctx); err != nil {
 		return err
 	}
 	return nil

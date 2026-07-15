@@ -37,6 +37,7 @@ Every agent message, command, warning, review, and outcome stays visible in a st
 
 - **Autonomous or supervised delivery** — Per-project: fully auto-merge, or stop at PR review for a human.
 - **Configurable agents** — Settings binds an Implementer (CLI) and Reviewer (CLI or OpenAI-compatible API).
+- **GitHub identity** — Choose whether PRs/comments use your `gh` login or a bot token, and whether commits are attributed to you, Ripple, or Ripple with you as co-author.
 - **Built-in review loop** — Independent PR review before merge; one auto fix pass in autonomous mode.
 - **Real delivery workflow** — Feature branches, commits, PRs, review comments, quality gates, and merges.
 - **Human-controlled planning** — People decide what enters the queue and when completed work is closed.
