@@ -198,11 +198,18 @@ label.checkbox-label input { min-height: auto; width: auto; }
 .create-project-modal-frame { max-height: 92vh; }
 .create-project-modal-heading { border-bottom: 1px solid var(--line); margin-bottom: 4px; padding: 0 40px 16px 0; }
 .create-project-modal-heading h2 { font-size: 22px; margin: 6px 0 0; }
-.create-project-form { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; padding: 8px 0 0; }
-.create-project-form label:nth-child(3),
-.create-project-form label:nth-child(4),
-.create-project-form .project-path-actions,
-.create-project-form > p { grid-column: 1 / -1; }
+.create-project-form { display: grid; gap: 12px; grid-template-columns: 1fr; padding: 8px 0 0; }
+.create-project-pair { align-items: start; display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+.create-project-field { display: grid; gap: 6px; }
+.create-project-form .settings-help {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.4;
+  margin: 0;
+  text-transform: none;
+}
 .project-path-actions { display: flex; gap: 7px; justify-content: flex-end; }
 .project-path-section form { display: grid; gap: 10px; }
 .project-path-section form label:not(.checkbox-label) { display: grid; gap: 6px; }
@@ -532,7 +539,7 @@ label.checkbox-label input { min-height: auto; width: auto; }
   .filter-panel > form { align-items: stretch; display: grid; }
   .project-settings[open] > form,
   .project-settings[open] > .project-settings-panel { min-width: min(380px, calc(100vw - 54px)); }
-  .create-project-form { grid-template-columns: 1fr; }
+  .create-project-pair { grid-template-columns: 1fr; }
   .run-header { align-items: stretch; flex-direction: column; padding: 12px; }
   .run-header-controls { align-items: stretch; flex-wrap: wrap; }
   .history-select { flex: 1; min-width: 180px; }

@@ -50,8 +50,13 @@
       <h2>Create project</h2>
     </div>
     <form class="create-project-form" method="post" action="/projects">
-      <label>Name<input name="name" placeholder="Acme" required autocomplete="off"></label>
-      <label>Prefix<input name="prefix" placeholder="ACM" maxlength="5" autocomplete="off"><small class="settings-help">Optional. Used for story IDs like ACM-001.</small></label>
+      <div class="create-project-pair">
+        <label>Name<input name="name" placeholder="Acme" required autocomplete="off"></label>
+        <div class="create-project-field">
+          <label>Prefix<input name="prefix" placeholder="ACM" maxlength="5" autocomplete="off"></label>
+          <p class="muted settings-help">Optional. Used for story IDs like ACM-001.</p>
+        </div>
+      </div>
       <label>Working directory<input name="workingDirectory" placeholder="/path/to/repository (optional)" autocomplete="off"></label>
       <label>Autonomy
         <select name="autonomyMode">
