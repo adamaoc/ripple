@@ -342,10 +342,6 @@ func TestGitMergeBaseIntoFeatureDetectsConflicts(t *testing.T) {
 	mustRunGit(t, dir, "update-ref", "refs/remotes/origin/main", "main")
 	mustRunGit(t, dir, "update-ref", "refs/remotes/origin/feature", "feature")
 
-	// fetch will no-op without origin remote; merge uses origin/main ref we created.
-	// Provide a dummy origin remote so gitFetchOrigin tries fetch (may fail) — better skip fetch by having remote get-url fail...
-	// Our helper uses origin/main via rev-parse; fetch is skipped without remote. Good.
-
 	hadConflicts, err := gitMergeBaseIntoFeature(t.Context(), dir, "feature", "main")
 	if err != nil {
 		t.Fatal(err)
@@ -356,6 +352,97 @@ func TestGitMergeBaseIntoFeatureDetectsConflicts(t *testing.T) {
 	ok, err := gitHasUnresolvedConflicts(t.Context(), dir)
 	if err != nil || !ok {
 		t.Fatalf("expected unresolved conflicts, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestGitCompleteMergeAfterAgentRewroteFileWithoutStaging(t *testing.T) {
+	dir := t.TempDir()
+	mustRunGit(t, dir, "init")
+	mustRunGit(t, dir, "config", "user.email", "t@example.com")
+	mustRunGit(t, dir, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("base\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, dir, "add", ".")
+	mustRunGit(t, dir, "commit", "-m", "base")
+	mustRunGit(t, dir, "branch", "-M", "main")
+	mustRunGit(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("feature\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, dir, "add", ".")
+	mustRunGit(t, dir, "commit", "-m", "feature")
+	mustRunGit(t, dir, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("mainline\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, dir, "add", ".")
+	mustRunGit(t, dir, "commit", "-m", "main")
+	mustRunGit(t, dir, "update-ref", "refs/remotes/origin/main", "main")
+
+	hadConflicts, err := gitMergeBaseIntoFeature(t.Context(), dir, "feature", "main")
+	if err != nil || !hadConflicts {
+		t.Fatalf("setup conflicts: had=%v err=%v", hadConflicts, err)
+	}
+
+	// Simulate agent: rewrite file with a clean resolution, but do not git-add.
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("resolved\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Index still unmerged...
+	unmerged, err := gitHasUnresolvedConflicts(t.Context(), dir)
+	if err != nil || !unmerged {
+		t.Fatalf("expected unmerged index before staging, unmerged=%v err=%v", unmerged, err)
+	}
+	// ...but working tree has no markers.
+	markers, err := gitWorktreeHasConflictMarkers(t.Context(), dir)
+	if err != nil || markers {
+		t.Fatalf("markers=%v err=%v", markers, err)
+	}
+
+	// Old bug: treating unmerged index as failure. New path: complete merge after staging.
+	if err := gitCompleteMergeCommit(t.Context(), dir, "resolve"); err != nil {
+		t.Fatal(err)
+	}
+	if gitMergeInProgress(t.Context(), dir) {
+		t.Fatal("merge should be finished")
+	}
+	body, _ := os.ReadFile(filepath.Join(dir, "f.txt"))
+	if string(body) != "resolved\n" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestGitMergeBaseResumesInProgressMerge(t *testing.T) {
+	dir := t.TempDir()
+	mustRunGit(t, dir, "init")
+	mustRunGit(t, dir, "config", "user.email", "t@example.com")
+	mustRunGit(t, dir, "config", "user.name", "t")
+	_ = os.WriteFile(filepath.Join(dir, "f.txt"), []byte("base\n"), 0600)
+	mustRunGit(t, dir, "add", ".")
+	mustRunGit(t, dir, "commit", "-m", "base")
+	mustRunGit(t, dir, "branch", "-M", "main")
+	mustRunGit(t, dir, "checkout", "-b", "feature")
+	_ = os.WriteFile(filepath.Join(dir, "f.txt"), []byte("feature\n"), 0600)
+	mustRunGit(t, dir, "add", ".")
+	mustRunGit(t, dir, "commit", "-m", "feature")
+	mustRunGit(t, dir, "checkout", "main")
+	_ = os.WriteFile(filepath.Join(dir, "f.txt"), []byte("mainline\n"), 0600)
+	mustRunGit(t, dir, "add", ".")
+	mustRunGit(t, dir, "commit", "-m", "main")
+	mustRunGit(t, dir, "update-ref", "refs/remotes/origin/main", "main")
+
+	had, err := gitMergeBaseIntoFeature(t.Context(), dir, "feature", "main")
+	if err != nil || !had {
+		t.Fatalf("first merge: had=%v err=%v", had, err)
+	}
+	// Second call should resume rather than failing checkout.
+	had2, err := gitMergeBaseIntoFeature(t.Context(), dir, "feature", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !had2 {
+		t.Fatal("expected still-conflicted merge on resume")
 	}
 }
 

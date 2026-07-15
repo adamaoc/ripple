@@ -246,19 +246,92 @@ func gitMergeInProgress(ctx context.Context, dir string) bool {
 	return false
 }
 
+func gitCurrentBranch(ctx context.Context, dir string) (string, error) {
+	stdout, stderr, err := runCommand(ctx, dir, "git", "branch", "--show-current")
+	if err != nil {
+		detail := strings.TrimSpace(stderr)
+		if detail == "" {
+			detail = err.Error()
+		}
+		return "", fmt.Errorf("current branch: %s", detail)
+	}
+	return strings.TrimSpace(stdout), nil
+}
+
+func gitAbortMerge(ctx context.Context, dir string) {
+	_, _, _ = runCommand(ctx, dir, "git", "merge", "--abort")
+}
+
+// gitWorktreeHasConflictMarkers reports whether any tracked file still contains merge markers.
+// Agents often rewrite conflicted files without git-add; the index can still look "unmerged"
+// even when the working tree content is clean — so marker scan is the source of truth after an agent pass.
+func gitWorktreeHasConflictMarkers(ctx context.Context, dir string) (bool, error) {
+	// git grep exits 1 when there are no matches.
+	stdout, stderr, err := runCommand(ctx, dir, "git", "grep", "-n", "-E", `^<<<<<<< |^>>>>>>> `, "--", ".")
+	if strings.TrimSpace(stdout) != "" {
+		return true, nil
+	}
+	if err == nil {
+		return false, nil
+	}
+	if strings.Contains(err.Error(), "exit status 1") {
+		return false, nil
+	}
+	detail := strings.TrimSpace(stderr)
+	if detail == "" {
+		detail = err.Error()
+	}
+	return false, fmt.Errorf("scan conflict markers: %s", detail)
+}
+
 // gitMergeBaseIntoFeature merges origin/defaultBranch into featureBranch.
 // Returns hadConflicts=true when the merge stopped with unresolved paths (agent should fix).
+// If a merge is already in progress on featureBranch (retry after a partial agent pass), resumes that merge.
 func gitMergeBaseIntoFeature(ctx context.Context, dir, featureBranch, defaultBranch string) (hadConflicts bool, err error) {
 	if err := gitFetchOrigin(ctx, dir); err != nil {
 		return false, err
 	}
+
+	if gitMergeInProgress(ctx, dir) {
+		current, curErr := gitCurrentBranch(ctx, dir)
+		if curErr != nil {
+			gitAbortMerge(ctx, dir)
+		} else if current == featureBranch {
+			conflicts, confErr := gitHasUnresolvedConflicts(ctx, dir)
+			if confErr != nil {
+				return false, confErr
+			}
+			if conflicts {
+				return true, nil
+			}
+			// Merge in progress but index is clean — ready to commit.
+			return false, nil
+		} else {
+			// Stale merge on another branch — reset so we can start cleanly.
+			gitAbortMerge(ctx, dir)
+		}
+	}
+
 	if err := gitCheckoutBranch(ctx, dir, featureBranch); err != nil {
-		return false, err
+		// Index may still be locked from a prior failed merge attempt.
+		if gitMergeInProgress(ctx, dir) {
+			gitAbortMerge(ctx, dir)
+			if err2 := gitCheckoutBranch(ctx, dir, featureBranch); err2 != nil {
+				return false, err2
+			}
+		} else {
+			return false, err
+		}
 	}
 	// Ensure we have the latest pushed feature tip when the branch tracks origin.
 	remoteFeature := "origin/" + featureBranch
 	if _, _, revErr := runCommand(ctx, dir, "git", "rev-parse", "--verify", remoteFeature); revErr == nil {
 		_, _, _ = runCommand(ctx, dir, "git", "merge", "--ff-only", remoteFeature)
+	}
+	// Prefer origin/default when available; also update local default so later ops are consistent.
+	_ = gitUpdateLocalBranchFromOrigin(ctx, dir, defaultBranch)
+	if err := gitCheckoutBranch(ctx, dir, featureBranch); err != nil {
+		return false, err
 	}
 	remoteBase := "origin/" + defaultBranch
 	if _, _, revErr := runCommand(ctx, dir, "git", "rev-parse", "--verify", remoteBase); revErr != nil {
@@ -290,6 +363,11 @@ func gitCompleteMergeCommit(ctx context.Context, dir, message string) error {
 			detail = err.Error()
 		}
 		return fmt.Errorf("git add failed: %s", detail)
+	}
+	if still, err := gitHasUnresolvedConflicts(ctx, dir); err != nil {
+		return err
+	} else if still {
+		return errors.New("unmerged paths remain after staging; conflict markers may still be present")
 	}
 	if gitMergeInProgress(ctx, dir) {
 		if _, stderr, err := runCommand(ctx, dir, "git", "commit", "--no-edit", "-m", message); err != nil {
@@ -1558,22 +1636,34 @@ func (a *App) runResolveConflicts(ctx context.Context, baseURL string, story Sto
 		return failBack(err, "Conflict merge failed: "+err.Error())
 	}
 
-	if !hadConflicts {
-		// Clean merge (or already up to date). Push if the merge created a commit / tree moved.
+	finishCleanMerge := func(agentResolved bool, message string) error {
 		dirty, dirtyErr := gitWorkingTreeDirty(ctx, dir)
 		if dirtyErr != nil {
 			return failBack(dirtyErr, "Conflict check failed: "+dirtyErr.Error())
 		}
 		if dirty || gitMergeInProgress(ctx, dir) {
-			if err := gitCompleteMergeCommit(ctx, dir, fmt.Sprintf("%s: merge %s", story.ID, defaultBranch)); err != nil {
-				return failBack(err, "Conflict merge commit failed: "+err.Error())
+			if err := gitCompleteMergeCommit(ctx, dir, fmt.Sprintf("%s: resolve merge conflicts with %s", story.ID, defaultBranch)); err != nil {
+				return failBack(err, "Conflict commit failed: "+err.Error())
 			}
 		}
 		if err := gitPushBranch(ctx, dir, pipeline.Branch); err != nil {
-			// Push may no-op if nothing new; still surface real errors.
-			return failBack(err, "Push after clean conflict merge failed: "+err.Error())
+			return failBack(err, "Push after conflict resolution failed: "+err.Error())
 		}
-		return a.completeResolveConflicts(ctx, story, pipeline, false, fmt.Sprintf("Merged latest %s without conflicts", defaultBranch))
+		return a.completeResolveConflicts(ctx, story, pipeline, agentResolved, message)
+	}
+
+	if !hadConflicts {
+		return finishCleanMerge(false, fmt.Sprintf("Merged latest %s without conflicts", defaultBranch))
+	}
+
+	// Index still lists unmerged paths, but a prior agent pass may already have
+	// rewritten the files without staging. If markers are gone, just commit/push.
+	markersLeft, markerErr := gitWorktreeHasConflictMarkers(ctx, dir)
+	if markerErr != nil {
+		return failBack(markerErr, "Conflict check failed: "+markerErr.Error())
+	}
+	if !markersLeft {
+		return finishCleanMerge(true, fmt.Sprintf("Staged previously resolved conflicts with %s and pushed", defaultBranch))
 	}
 
 	docs, err := embeddedFiles.ReadFile("docs/bot-api.md")
@@ -1586,25 +1676,20 @@ func (a *App) runResolveConflicts(ctx context.Context, baseURL string, story Sto
 		return failBack(err, "Conflict resolution agent failed: "+err.Error())
 	}
 
-	stillConflicted, confErr := gitHasUnresolvedConflicts(ctx, dir)
-	if confErr != nil {
-		return failBack(confErr, "Conflict check failed: "+confErr.Error())
+	// Source of truth after the agent: working-tree conflict markers (not the unmerged index).
+	markersLeft, markerErr = gitWorktreeHasConflictMarkers(ctx, dir)
+	if markerErr != nil {
+		return failBack(markerErr, "Conflict check failed: "+markerErr.Error())
 	}
-	if stillConflicted {
-		return failBack(errors.New("unresolved conflict markers remain after the agent pass"), "Conflict resolution incomplete: unresolved markers remain")
+	if markersLeft {
+		return failBack(errors.New("unresolved conflict markers remain after the agent pass"), "Conflict resolution incomplete: unresolved markers remain in files")
 	}
 
-	if err := gitCompleteMergeCommit(ctx, dir, fmt.Sprintf("%s: resolve merge conflicts with %s", story.ID, defaultBranch)); err != nil {
-		return failBack(err, "Conflict commit failed: "+err.Error())
-	}
-	if err := gitPushBranch(ctx, dir, pipeline.Branch); err != nil {
-		return failBack(err, "Push after conflict resolution failed: "+err.Error())
-	}
 	msg := strings.TrimSpace(finalMessage)
 	if msg == "" {
 		msg = fmt.Sprintf("Resolved conflicts with %s and pushed", defaultBranch)
 	}
-	return a.completeResolveConflicts(ctx, story, pipeline, true, msg)
+	return finishCleanMerge(true, msg)
 }
 
 func (a *App) completeResolveConflicts(ctx context.Context, story Story, pipeline StoryPipeline, agentResolved bool, message string) error {
