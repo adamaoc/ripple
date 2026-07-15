@@ -43,7 +43,7 @@ GET /api/openapi.yaml
 
 ## Human-Friendly IDs
 
-Stories use project-prefixed IDs such as `TXG-001` or `RV-001`.
+Stories use project-prefixed IDs such as `ACM-001` or `HBR-001`.
 
 Projects have a required prefix. When creating a project through a story request, provide `projectPrefix` if the user has a clear preference. If no prefix is known, choose a short uppercase prefix from the project name.
 
@@ -74,10 +74,10 @@ POST /api/projects
 Content-Type: application/json
 
 {
-  "id": "txgarage",
-  "name": "TXGarage",
-  "prefix": "TXG",
-  "workingDirectory": "/path/to/txgarage",
+  "id": "acme",
+  "name": "Acme",
+  "prefix": "ACM",
+  "workingDirectory": "/path/to/acme",
   "autonomyMode": "autonomous",
   "defaultBranchOverride": "",
   "prBaseBranch": "",
@@ -98,9 +98,9 @@ POST /api/epics
 Content-Type: application/json
 
 {
-  "projectId": "txgarage",
-  "name": "Mobile polish",
-  "description": "Cleanup work for the mobile experience."
+  "projectId": "acme",
+  "name": "Onboarding polish",
+  "description": "Cleanup work for the first-run experience."
 }
 ```
 
@@ -115,9 +115,9 @@ POST /api/stories
 Content-Type: application/json
 
 {
-  "projectId": "txgarage",
-  "title": "Add saved vehicle filter",
-  "description": "Add a filter so users can view saved vehicles only.",
+  "projectId": "acme",
+  "title": "Add dark mode toggle",
+  "description": "Add a setting so users can switch between light and dark themes.",
   "status": "backlog"
 }
 ```
@@ -129,12 +129,12 @@ POST /api/stories
 Content-Type: application/json
 
 {
-  "projectName": "Real View",
-  "projectPrefix": "RV",
-  "workingDirectory": "/path/to/realview",
-  "epicName": "Listing workflow",
-  "title": "Show listing preview before publish",
-  "description": "Render a Markdown-friendly preview of the listing before it goes live."
+  "projectName": "Harbor",
+  "projectPrefix": "HBR",
+  "workingDirectory": "/path/to/harbor",
+  "epicName": "Notifications",
+  "title": "Send weekly email digests",
+  "description": "Batch unread activity into a weekly email for subscribed users."
 }
 ```
 
@@ -151,10 +151,10 @@ GET /api/stories
 Filter by project, epic, or status:
 
 ```http
-GET /api/stories?projectId=txgarage
-GET /api/stories?epicId=txgarage-mobile-polish
+GET /api/stories?projectId=acme
+GET /api/stories?epicId=acme-onboarding-polish
 GET /api/stories?status=in_progress
-GET /api/stories?projectId=txgarage&status=backlog
+GET /api/stories?projectId=acme&status=backlog
 ```
 
 Include closed stories only when the user specifically asks for archived or closed work:
@@ -168,7 +168,7 @@ GET /api/stories?showClosed=1
 Use this to change title, description, or epic.
 
 ```http
-PATCH /api/stories/TXG-001
+PATCH /api/stories/ACM-001
 Content-Type: application/json
 
 {
@@ -181,7 +181,7 @@ Content-Type: application/json
 Use this to move work through the bot-writable workflow.
 
 ```http
-PATCH /api/stories/TXG-001/status
+PATCH /api/stories/ACM-001/status
 Content-Type: application/json
 
 {
@@ -202,5 +202,5 @@ Do not attempt to set `queued`, `in_review`, or `closed`; the API rejects them.
 Use this when you need to understand what happened to a story.
 
 ```http
-GET /api/stories/TXG-001/events
+GET /api/stories/ACM-001/events
 ```

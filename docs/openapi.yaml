@@ -233,7 +233,7 @@ components:
       required: true
       schema:
         type: string
-      example: TXG-001
+      example: ACM-001
   schemas:
     StoryStatus:
       type: string
