@@ -137,6 +137,15 @@
       submitter.classList.add('is-busy-submit');
       submitter.dataset.originalLabel = submitter.textContent;
       submitter.textContent = busyLabel;
+
+      const panel = form.closest('[data-supervised-panel]');
+      if (panel) {
+        panel.classList.add('is-agent-running');
+        const heading = panel.querySelector('[data-awaiting-heading]');
+        if (heading) heading.textContent = heading.dataset.runningLabel || 'Running…';
+        const help = panel.querySelector('[data-awaiting-help]');
+        if (help) help.textContent = 'The agent is working on this story. Actions will unlock when it finishes.';
+      }
     });
 
     const runRoot = document.querySelector('[data-run-root]');

@@ -1303,7 +1303,7 @@ func TestStoryPanelShowsSyncPRForInReview(t *testing.T) {
 	}
 	body := res.Body.String()
 	for _, marker := range []string{
-		"Sync PR status",
+		"I already merged on GitHub",
 		`action="/stories/` + story.ID + `/sync-pr"`,
 		"already merged on GitHub",
 	} {
@@ -1522,7 +1522,8 @@ func TestRunPageShowsAwaitingHumanSummary(t *testing.T) {
 		`action="/stories/` + story.ID + `/sync-pr"`,
 		"Act on review comments",
 		"Merge pull request",
-		"Sync PR status",
+		"I already merged on GitHub",
+		"Waiting on you",
 		fmt.Sprintf(`value="/projects/atlas/runs/%d"`, runID),
 	} {
 		if !strings.Contains(body, marker) {

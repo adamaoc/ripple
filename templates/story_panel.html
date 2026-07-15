@@ -47,8 +47,8 @@
     </form>
     <form method="post" action="/stories/{{.Story.ID}}/sync-pr" data-current-redirect data-busy-submit class="supervised-action-form">
       <input type="hidden" name="redirect">
-      <button type="submit" class="secondary-button" data-busy-label="Syncing PR status…" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}}>Sync PR status</button>
-      <p class="muted settings-help">If you already merged on GitHub, update the story to done without merging again.</p>
+      <button type="submit" class="secondary-button" data-busy-label="Checking GitHub merge…" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}}>I already merged on GitHub</button>
+      <p class="muted settings-help">Use this only if you merged the PR in GitHub yourself. Ripple checks that it is merged, then marks the story done — it does not merge again.</p>
     </form>
   </div>
 </section>

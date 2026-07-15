@@ -54,10 +54,13 @@
           </details>
           {{else}}<div class="transcript-empty"><span class="mono">&gt;_</span><h3>Waiting for the first agent event</h3><p>The transcript will build here as the run advances.</p></div>{{end}}
           {{if .Run.Summary.AwaitingHumanPRs}}
-          <section class="run-human-actions" data-run-section="awaiting-human">
+          <section class="run-human-actions{{if .Run.Agent.Running}} is-agent-running{{end}}" data-run-section="awaiting-human" data-supervised-panel>
             <div class="run-human-actions-heading">
-              <div><span class="eyebrow">Supervised delivery</span><h3>Waiting on you</h3></div>
-              <p class="muted">Review each PR, leave feedback if needed, then act here without leaving the run.</p>
+              <div>
+                <span class="eyebrow">Supervised delivery</span>
+                <h3 data-awaiting-heading data-waiting-label="Waiting on you" data-running-label="Running…">{{if .Run.Agent.Running}}Running…{{else}}Waiting on you{{end}}</h3>
+              </div>
+              <p class="muted" data-awaiting-help>{{if .Run.Agent.Running}}The agent is working on this story. Actions will unlock when it finishes.{{else}}Review each PR, leave feedback if needed, then act here without leaving the run.{{end}}</p>
             </div>
             {{range .Run.Summary.AwaitingHumanPRs}}
             <article class="run-human-action-card" data-supervised-actions>
@@ -81,10 +84,14 @@
                 </form>
                 <form method="post" action="/stories/{{.StoryID}}/sync-pr" data-current-redirect data-busy-submit class="supervised-action-form">
                   <input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/runs/{{$.Run.Run.ID}}">
-                  <button type="submit" class="secondary-button" data-busy-label="Syncing PR status…" {{if $.Run.Agent.Running}}disabled{{end}}>Sync PR status</button>
+                  <button type="submit" class="secondary-button" data-busy-label="Checking GitHub merge…" {{if $.Run.Agent.Running}}disabled{{end}}>I already merged on GitHub</button>
                 </form>
               </div>
-              <p class="muted settings-help">Act on feedback re-reads the latest PR comments and pushes fixes. Merge runs checks then merges. Sync marks done if you already merged on GitHub.</p>
+              <p class="muted settings-help">
+                <strong>Act on review comments</strong> — agent reads the latest PR feedback and pushes fixes.<br>
+                <strong>Merge pull request</strong> — Ripple runs checks, merges on GitHub, and marks the story done.<br>
+                <strong>I already merged on GitHub</strong> — you merged in the GitHub UI; Ripple only checks that and marks the story done (does not merge again).
+              </p>
             </article>
             {{end}}
             {{if .Run.Agent.Running}}<p class="inline-notice">An agent action is already running. Wait for it to finish before starting another.</p>{{end}}

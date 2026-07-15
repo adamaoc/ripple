@@ -106,7 +106,7 @@ Each project chooses how far automation may go:
 | Mode | Behavior |
 | --- | --- |
 | **Autonomous** (default) | Implement → PR → agent review → optional one fix pass → quality gate → merge → `done` |
-| **Supervised** | Implement → PR → agent review → stop at `in_review`. You act on comments, merge (with quality gate), or **Sync PR status** if you already merged on GitHub |
+| **Supervised** | Implement → PR → agent review → stop at `in_review`. You act on comments, merge (with quality gate), or mark done if you already merged on GitHub |
 
 While a story is `in_review`, the queue continues with later stories so human latency does not block the run.
 
@@ -114,7 +114,7 @@ On supervised stories in the story panel:
 
 - **Act on review comments** — Agent applies PR feedback and pushes (no quality gate on this step)
 - **Merge pull request** — Quality gate, then merge, then `done`
-- **Sync PR status** — If you merged on GitHub already, mark the story done
+- **I already merged on GitHub** — If you merged outside Ripple, verify that and mark the story done (does not merge again)
 
 ## Agent settings
 
