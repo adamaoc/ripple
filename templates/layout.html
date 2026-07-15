@@ -120,27 +120,41 @@
       if (!form.hasAttribute('data-busy-submit') || form.dataset.busy === '1') return;
       const submitter = event.submitter || form.querySelector('button[type="submit"]:not([disabled])');
       if (!submitter || submitter.disabled) return;
+      // Prevent double-submit from this form and sibling supervised cards on the same page.
+      const panel = form.closest('[data-supervised-panel]');
+      const hosts = panel
+        ? [...panel.querySelectorAll('[data-supervised-actions]')]
+        : [form.closest('[data-supervised-actions]') || form];
+      if (hosts.some((host) => host && host.dataset.busy === '1')) {
+        event.preventDefault();
+        return;
+      }
       form.dataset.busy = '1';
 
-      const host = form.closest('[data-supervised-actions]') || form;
-      host.classList.add('is-busy');
-      const status = host.querySelector('[data-supervised-busy-status]');
       const busyLabel = submitter.dataset.busyLabel || 'Working…';
-      if (status) {
-        status.hidden = false;
-        status.textContent = busyLabel;
-      }
-      host.querySelectorAll('button[type="submit"]').forEach((button) => {
-        button.disabled = true;
-        button.setAttribute('aria-busy', 'true');
+      hosts.forEach((host) => {
+        if (!host) return;
+        host.dataset.busy = '1';
+        host.classList.add('is-busy');
+        const status = host.querySelector('[data-supervised-busy-status]');
+        if (status) {
+          status.hidden = false;
+          status.textContent = busyLabel;
+        }
+        host.querySelectorAll('button[type="submit"]').forEach((button) => {
+          button.disabled = true;
+          button.setAttribute('aria-busy', 'true');
+        });
       });
       submitter.classList.add('is-busy-submit');
       submitter.dataset.originalLabel = submitter.textContent;
       submitter.textContent = busyLabel;
 
-      const panel = form.closest('[data-supervised-panel]');
       if (panel) {
         panel.classList.add('is-agent-running');
+        panel.querySelectorAll('form[data-busy-submit]').forEach((sibling) => {
+          sibling.dataset.busy = '1';
+        });
         const heading = panel.querySelector('[data-awaiting-heading]');
         if (heading) heading.textContent = heading.dataset.runningLabel || 'Running…';
         const help = panel.querySelector('[data-awaiting-help]');

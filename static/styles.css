@@ -416,6 +416,7 @@ button.is-busy-submit {
 .completion-prs { padding: 15px 18px 18px; }
 .completion-prs h4 { font-size: 11px; letter-spacing: .07em; margin: 0 0 9px; text-transform: uppercase; }
 .completion-prs a { align-items: center; border-top: 1px solid var(--line); color: var(--text); display: flex; justify-content: space-between; padding: 10px 0; text-decoration: none; }
+.run-action-error { margin: 18px 0 0; }
 .run-human-actions { background: var(--surface); border: 1px solid var(--accent); margin: 26px 0 18px; }
 .run-human-actions.is-agent-running { border-color: var(--line-strong); }
 .run-human-actions-heading { border-bottom: 1px solid var(--line); display: grid; gap: 6px; padding: 16px 18px; }

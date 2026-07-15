@@ -293,6 +293,8 @@ type RunPageData struct {
 	MissingPath bool
 	Legacy      bool
 	Summary     RunCompletionSummary
+	// ActionError is a user-facing message from a failed supervised action (query ?error=).
+	ActionError string
 }
 
 type RunCompletionSummary struct {
@@ -707,7 +709,11 @@ func (a *App) projectRunPageData(r *http.Request) (PageData, error) {
 	if err != nil {
 		return PageData{}, err
 	}
-	runData := RunPageData{Project: project, Run: selected, Runs: runs, LiveQueue: queued, Agent: a.currentAgentStatus(), MissingPath: strings.TrimSpace(project.WorkingDirectory) == ""}
+	runData := RunPageData{
+		Project: project, Run: selected, Runs: runs, LiveQueue: queued,
+		Agent: a.currentAgentStatus(), MissingPath: strings.TrimSpace(project.WorkingDirectory) == "",
+		ActionError: strings.TrimSpace(r.URL.Query().Get("error")),
+	}
 	if selected.ID != 0 {
 		runData.Items, err = a.listQueueRunItems(r.Context(), selected.ID)
 		if err != nil {
@@ -1016,6 +1022,28 @@ func (a *App) finishUIAction(w http.ResponseWriter, r *http.Request) {
 	a.renderBoardPartial(w, r)
 }
 
+// finishUIActionError redirects form POSTs back to redirect with ?error=… when possible,
+// instead of dumping a raw JSON error page (which abandons the user on /stories/.../merge).
+func (a *App) finishUIActionError(w http.ResponseWriter, r *http.Request, err error) {
+	redirect := strings.TrimSpace(r.FormValue("redirect"))
+	if strings.HasPrefix(redirect, "/") && !strings.HasPrefix(redirect, "//") {
+		msg := err.Error()
+		var ce clientError
+		if errors.As(err, &ce) {
+			msg = ce.message
+		}
+		// Cap length so the URL stays usable.
+		msg = truncate(msg, 280)
+		sep := "?"
+		if strings.Contains(redirect, "?") {
+			sep = "&"
+		}
+		http.Redirect(w, r, redirect+sep+"error="+url.QueryEscape(msg), http.StatusSeeOther)
+		return
+	}
+	httpError(w, err)
+}
+
 func (a *App) handleStoryPanel(w http.ResponseWriter, r *http.Request) {
 	data, err := a.storyPanelData(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -1046,11 +1074,11 @@ func (a *App) storyPanelData(ctx context.Context, storyID string) (StoryPanelDat
 
 func (a *App) handleUIAddressFeedback(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		httpError(w, err)
+		a.finishUIActionError(w, r, err)
 		return
 	}
 	if err := a.startAddressFeedback(r.PathValue("id"), requestBaseURL(r)); err != nil {
-		httpError(w, err)
+		a.finishUIActionError(w, r, err)
 		return
 	}
 	a.finishUIAction(w, r)
@@ -1058,11 +1086,11 @@ func (a *App) handleUIAddressFeedback(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleUIMergeStory(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		httpError(w, err)
+		a.finishUIActionError(w, r, err)
 		return
 	}
 	if err := a.startHumanMerge(r.PathValue("id")); err != nil {
-		httpError(w, err)
+		a.finishUIActionError(w, r, err)
 		return
 	}
 	a.finishUIAction(w, r)
@@ -1070,11 +1098,11 @@ func (a *App) handleUIMergeStory(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleUISyncPR(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		httpError(w, err)
+		a.finishUIActionError(w, r, err)
 		return
 	}
 	if err := a.syncExternalPRMerge(r.Context(), r.PathValue("id")); err != nil {
-		httpError(w, err)
+		a.finishUIActionError(w, r, err)
 		return
 	}
 	a.finishUIAction(w, r)

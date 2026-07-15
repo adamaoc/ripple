@@ -53,6 +53,9 @@
             </div>
           </details>
           {{else}}<div class="transcript-empty"><span class="mono">&gt;_</span><h3>Waiting for the first agent event</h3><p>The transcript will build here as the run advances.</p></div>{{end}}
+          {{if .Run.ActionError}}
+          <p class="inline-notice error run-action-error" role="alert">{{.Run.ActionError}}</p>
+          {{end}}
           {{if .Run.Summary.AwaitingHumanPRs}}
           <section class="run-human-actions{{if .Run.Agent.Running}} is-agent-running{{end}}" data-run-section="awaiting-human" data-supervised-panel>
             <div class="run-human-actions-heading">
@@ -60,7 +63,7 @@
                 <span class="eyebrow">Supervised delivery</span>
                 <h3 data-awaiting-heading data-waiting-label="Waiting on you" data-running-label="Running…">{{if .Run.Agent.Running}}Running…{{else}}Waiting on you{{end}}</h3>
               </div>
-              <p class="muted" data-awaiting-help>{{if .Run.Agent.Running}}The agent is working on this story. Actions will unlock when it finishes.{{else}}Review each PR, leave feedback if needed, then act here without leaving the run.{{end}}</p>
+              <p class="muted" data-awaiting-help>{{if .Run.Agent.Running}}The agent is working on this story. Actions will unlock when it finishes.{{else}}Review each PR, leave feedback if needed, then act here without leaving the run. One action at a time.{{end}}</p>
             </div>
             {{range .Run.Summary.AwaitingHumanPRs}}
             <article class="run-human-action-card" data-supervised-actions>

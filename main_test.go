@@ -665,11 +665,13 @@ func TestAddressFeedbackWrongStatusRejected(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	res := httptest.NewRecorder()
 	app.routes().ServeHTTP(res, req)
-	if res.Code != http.StatusBadRequest {
+	if res.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d; body = %s", res.Code, res.Body.String())
 	}
-	if !strings.Contains(res.Body.String(), "in review") {
-		t.Fatalf("error should mention in review: %s", res.Body.String())
+	loc := res.Header().Get("Location")
+	decoded, _ := url.QueryUnescape(loc)
+	if !strings.Contains(loc, "/projects/atlas/backlog") || !strings.Contains(decoded, "in review") {
+		t.Fatalf("expected redirect with in-review error, got %q", loc)
 	}
 }
 
@@ -859,11 +861,13 @@ func TestHumanMergeWrongStatusRejected(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	res := httptest.NewRecorder()
 	app.routes().ServeHTTP(res, req)
-	if res.Code != http.StatusBadRequest {
+	if res.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d; body = %s", res.Code, res.Body.String())
 	}
-	if !strings.Contains(res.Body.String(), "in review") {
-		t.Fatalf("error should mention in review: %s", res.Body.String())
+	loc := res.Header().Get("Location")
+	decoded, _ := url.QueryUnescape(loc)
+	if !strings.Contains(loc, "/projects/atlas/backlog") || !strings.Contains(decoded, "in review") {
+		t.Fatalf("expected redirect with in-review error, got %q", loc)
 	}
 }
 
@@ -1469,11 +1473,61 @@ func TestSyncExternalPRWrongStatusRejected(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	res := httptest.NewRecorder()
 	app.routes().ServeHTTP(res, req)
-	if res.Code != http.StatusBadRequest {
+	if res.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d; body = %s", res.Code, res.Body.String())
 	}
-	if !strings.Contains(res.Body.String(), "in review") {
-		t.Fatalf("error should mention in review: %s", res.Body.String())
+	loc := res.Header().Get("Location")
+	if !strings.Contains(loc, "/projects/atlas/backlog") || !strings.Contains(loc, "error=") || !strings.Contains(loc, "review") {
+		t.Fatalf("expected redirect with error about in review, got %q", loc)
+	}
+}
+
+func TestMergeWhileAgentRunningRedirectsWithError(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	story := stories[0]
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue")
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, err := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = app.upsertStoryPipeline(context.Background(), StoryPipeline{
+		QueueRunID: runID, StoryID: story.ID, Phase: PipelinePhaseAwaitingHuman,
+		Branch: "b", PRNumber: 1, PRURL: "https://example.com/pull/1",
+	})
+	_ = app.changeStoryStatus(context.Background(), story.ID, StatusInReview, false, "await")
+
+	// Simulate another agent action holding the global lock.
+	app.agentMu.Lock()
+	app.agentStatus = AgentStatus{Running: true, QueueRunID: runID, CurrentStoryID: story.ID, Message: "busy"}
+	app.agentMu.Unlock()
+
+	form := url.Values{"redirect": {fmt.Sprintf("/projects/atlas/runs/%d", runID)}}
+	req := httptest.NewRequest(http.MethodPost, "/stories/"+story.ID+"/merge", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, req)
+	if res.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d; body = %s", res.Code, res.Body.String())
+	}
+	loc := res.Header().Get("Location")
+	if !strings.Contains(loc, fmt.Sprintf("/projects/atlas/runs/%d", runID)) {
+		t.Fatalf("location = %q", loc)
+	}
+	decoded, _ := url.QueryUnescape(loc)
+	if !strings.Contains(decoded, "already running") {
+		t.Fatalf("expected already-running error in redirect, got %q", loc)
+	}
+
+	// Run page surfaces the error banner.
+	getRes := httptest.NewRecorder()
+	app.routes().ServeHTTP(getRes, httptest.NewRequest(http.MethodGet, loc, nil))
+	if getRes.Code != http.StatusOK {
+		t.Fatalf("run page status = %d", getRes.Code)
+	}
+	if !strings.Contains(getRes.Body.String(), "already running") {
+		t.Fatal("run page should show action error banner")
 	}
 }
 
