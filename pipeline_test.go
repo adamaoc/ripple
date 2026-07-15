@@ -167,6 +167,72 @@ func TestBuildCodexAddressFeedbackPromptPrioritizesHuman(t *testing.T) {
 	}
 }
 
+func TestAppendPRInlineReviewComments(t *testing.T) {
+	// REST /pulls/{n}/comments shape (inline review comments).
+	raw := `[
+		{"user":{"login":"adamaoc"},"body":"let's change the title here to \"Ripple Todo\"","path":"todo-rip/index.html","line":12,"original_line":12},
+		{"user":{"login":"bot"},"body":"","path":"x.go","line":1}
+	]`
+	var fb PRFeedback
+	if err := appendPRInlineReviewComments(&fb, raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(fb.Items) != 1 {
+		t.Fatalf("items = %#v, want 1 non-empty comment", fb.Items)
+	}
+	got := fb.Items[0]
+	if got.Kind != "review_comment" || got.Author != "adamaoc" || got.Path != "todo-rip/index.html" || got.Line != 12 {
+		t.Fatalf("item = %#v", got)
+	}
+	if !strings.Contains(got.Body, "Ripple Todo") {
+		t.Fatalf("body = %q", got.Body)
+	}
+}
+
+func TestAppendPRInlineReviewCommentsUsesOriginalLine(t *testing.T) {
+	// line omitted / zero — use original_line
+	raw := `[{"user":{"login":"ada"},"body":"nit","path":"a.go","original_line":8}]`
+	var fb PRFeedback
+	if err := appendPRInlineReviewComments(&fb, raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(fb.Items) != 1 || fb.Items[0].Line != 8 {
+		t.Fatalf("items = %#v", fb.Items)
+	}
+}
+
+func TestPrioritizeHumanFeedbackOrdersInlineFirst(t *testing.T) {
+	fb := PRFeedback{
+		Items: []PRFeedbackItem{
+			{Kind: "issue_comment", Author: "bot", Body: "## Agent review\n\nLooks mostly fine."},
+			{Kind: "review", Author: "rev", Body: "(COMMENTED) overall notes"},
+			{Kind: "review_comment", Author: "ada", Body: `change title to "Ripple Todo"`, Path: "index.html", Line: 12},
+			{Kind: "issue_comment", Author: "ada", Body: "Also wire up the form submit handler."},
+		},
+	}
+	prioritizeHumanFeedback(&fb)
+	if fb.Items[0].Kind != "review_comment" || !strings.Contains(fb.Items[0].Body, "Ripple Todo") {
+		t.Fatalf("expected inline human comment first, got %#v", fb.Items[0])
+	}
+	if fb.Items[1].Kind != "issue_comment" || !strings.Contains(fb.Items[1].Body, "form submit") {
+		t.Fatalf("expected human issue comment second, got %#v", fb.Items[1])
+	}
+	if !strings.HasPrefix(strings.TrimSpace(fb.Items[len(fb.Items)-1].Body), "## Agent review") {
+		t.Fatalf("expected agent review last, got %#v", fb.Items[len(fb.Items)-1])
+	}
+}
+
+func TestAppendPRReviewBodiesSkipsEmpty(t *testing.T) {
+	raw := `{"reviews":[{"author":{"login":"ada"},"body":"","state":"COMMENTED"},{"author":{"login":"ada"},"body":"Please add tests","state":"CHANGES_REQUESTED"}]}`
+	var fb PRFeedback
+	if err := appendPRReviewBodies(&fb, raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(fb.Items) != 1 || !strings.Contains(fb.Items[0].Body, "Please add tests") {
+		t.Fatalf("items = %#v", fb.Items)
+	}
+}
+
 func TestQualityGateChecksIncludeBuildAndTypecheck(t *testing.T) {
 	dir := t.TempDir()
 	packageJSON := `{"scripts":{"test":"vitest run","lint":"eslint","typecheck":"tsc --noEmit","build":"vite build","format":"prettier --write ."}}`

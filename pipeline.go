@@ -14,6 +14,7 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -617,14 +618,66 @@ func buildCodexAddressFeedbackPrompt(baseURL, botDocs string, project Project, s
 
 func ghCollectPRFeedback(ctx context.Context, ghBin, dir string, prNumber int, agentReviewJSON string) (PRFeedback, error) {
 	feedback := PRFeedback{AgentReviewJSON: strings.TrimSpace(agentReviewJSON)}
-	stdout, stderr, err := runCommand(ctx, dir, ghBin, "pr", "view", fmt.Sprintf("%d", prNumber), "--json", "reviews,comments")
+
+	// Review submission bodies (top-level review text). Note: gh pr view --json comments
+	// is conversation/issue comments, NOT inline review comments — those come from the REST API below.
+	stdout, stderr, err := runCommand(ctx, dir, ghBin, "pr", "view", fmt.Sprintf("%d", prNumber), "--json", "reviews")
 	if err != nil {
 		detail := strings.TrimSpace(stderr)
 		if detail == "" {
 			detail = err.Error()
 		}
-		return PRFeedback{}, fmt.Errorf("collect PR reviews/comments failed: %s", detail)
+		return PRFeedback{}, fmt.Errorf("collect PR reviews failed: %s", detail)
 	}
+	if err := appendPRReviewBodies(&feedback, stdout); err != nil {
+		return PRFeedback{}, err
+	}
+
+	repoStdout, _, repoErr := runCommand(ctx, dir, ghBin, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+	if repoErr != nil {
+		// Still return review bodies if we cannot resolve the repo for comment APIs.
+		prioritizeHumanFeedback(&feedback)
+		return feedback, nil
+	}
+	repo := strings.TrimSpace(repoStdout)
+	if repo == "" {
+		prioritizeHumanFeedback(&feedback)
+		return feedback, nil
+	}
+
+	// Inline code review comments (line comments on the diff).
+	reviewCommentsPath := fmt.Sprintf("repos/%s/pulls/%d/comments", repo, prNumber)
+	reviewOut, reviewErrOut, reviewErr := runCommand(ctx, dir, ghBin, "api", reviewCommentsPath)
+	if reviewErr != nil {
+		detail := strings.TrimSpace(reviewErrOut)
+		if detail == "" {
+			detail = reviewErr.Error()
+		}
+		return PRFeedback{}, fmt.Errorf("collect PR review comments failed: %s", detail)
+	}
+	if err := appendPRInlineReviewComments(&feedback, reviewOut); err != nil {
+		return PRFeedback{}, err
+	}
+
+	// Conversation / issue comments on the PR.
+	issuePath := fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNumber)
+	issueOut, issueErrOut, issueErr := runCommand(ctx, dir, ghBin, "api", issuePath)
+	if issueErr != nil {
+		detail := strings.TrimSpace(issueErrOut)
+		if detail == "" {
+			detail = issueErr.Error()
+		}
+		return PRFeedback{}, fmt.Errorf("collect PR issue comments failed: %s", detail)
+	}
+	if err := appendPRIssueComments(&feedback, issueOut); err != nil {
+		return PRFeedback{}, err
+	}
+
+	prioritizeHumanFeedback(&feedback)
+	return feedback, nil
+}
+
+func appendPRReviewBodies(feedback *PRFeedback, raw string) error {
 	var view struct {
 		Reviews []struct {
 			Author struct {
@@ -633,17 +686,9 @@ func ghCollectPRFeedback(ctx context.Context, ghBin, dir string, prNumber int, a
 			Body  string `json:"body"`
 			State string `json:"state"`
 		} `json:"reviews"`
-		Comments []struct {
-			Author struct {
-				Login string `json:"login"`
-			} `json:"author"`
-			Body string `json:"body"`
-			Path string `json:"path"`
-			Line int    `json:"line"`
-		} `json:"comments"`
 	}
-	if err := json.Unmarshal([]byte(stdout), &view); err != nil {
-		return PRFeedback{}, fmt.Errorf("parse PR review payload: %w", err)
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		return fmt.Errorf("parse PR review payload: %w", err)
 	}
 	for _, review := range view.Reviews {
 		body := strings.TrimSpace(review.Body)
@@ -661,58 +706,95 @@ func ghCollectPRFeedback(ctx context.Context, ghBin, dir string, prNumber int, a
 			Kind: "review", Author: author, Body: body,
 		})
 	}
-	for _, comment := range view.Comments {
+	return nil
+}
+
+func appendPRInlineReviewComments(feedback *PRFeedback, raw string) error {
+	var comments []struct {
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Body string `json:"body"`
+		Path string `json:"path"`
+		Line int    `json:"line"`
+		// GitHub may only populate original_line when the line moved.
+		OriginalLine int `json:"original_line"`
+	}
+	if err := json.Unmarshal([]byte(raw), &comments); err != nil {
+		return fmt.Errorf("parse PR review comments: %w", err)
+	}
+	for _, comment := range comments {
 		body := strings.TrimSpace(comment.Body)
 		if body == "" {
 			continue
 		}
-		author := strings.TrimSpace(comment.Author.Login)
+		author := strings.TrimSpace(comment.User.Login)
+		if author == "" {
+			author = "unknown"
+		}
+		line := comment.Line
+		if line == 0 {
+			line = comment.OriginalLine
+		}
+		feedback.Items = append(feedback.Items, PRFeedbackItem{
+			Kind: "review_comment", Author: author, Body: body, Path: comment.Path, Line: line,
+		})
+	}
+	return nil
+}
+
+func appendPRIssueComments(feedback *PRFeedback, raw string) error {
+	var issueComments []struct {
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(raw), &issueComments); err != nil {
+		return fmt.Errorf("parse PR issue comments: %w", err)
+	}
+	for _, comment := range issueComments {
+		body := strings.TrimSpace(comment.Body)
+		if body == "" {
+			continue
+		}
+		author := strings.TrimSpace(comment.User.Login)
 		if author == "" {
 			author = "unknown"
 		}
 		feedback.Items = append(feedback.Items, PRFeedbackItem{
-			Kind: "review_comment", Author: author, Body: body, Path: comment.Path, Line: comment.Line,
+			Kind: "issue_comment", Author: author, Body: body,
 		})
 	}
+	return nil
+}
 
-	repoStdout, _, repoErr := runCommand(ctx, dir, ghBin, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
-	if repoErr == nil {
-		repo := strings.TrimSpace(repoStdout)
-		if repo != "" {
-			apiPath := fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNumber)
-			issueOut, issueErrOut, issueErr := runCommand(ctx, dir, ghBin, "api", apiPath)
-			if issueErr != nil {
-				detail := strings.TrimSpace(issueErrOut)
-				if detail == "" {
-					detail = issueErr.Error()
-				}
-				return PRFeedback{}, fmt.Errorf("collect PR issue comments failed: %s", detail)
-			}
-			var issueComments []struct {
-				User struct {
-					Login string `json:"login"`
-				} `json:"user"`
-				Body string `json:"body"`
-			}
-			if err := json.Unmarshal([]byte(issueOut), &issueComments); err != nil {
-				return PRFeedback{}, fmt.Errorf("parse PR issue comments: %w", err)
-			}
-			for _, comment := range issueComments {
-				body := strings.TrimSpace(comment.Body)
-				if body == "" {
-					continue
-				}
-				author := strings.TrimSpace(comment.User.Login)
-				if author == "" {
-					author = "unknown"
-				}
-				feedback.Items = append(feedback.Items, PRFeedbackItem{
-					Kind: "issue_comment", Author: author, Body: body,
-				})
-			}
-		}
+// prioritizeHumanFeedback sorts items so human/inline feedback is listed before
+// auto-posted agent reviews (bodies starting with "## Agent review").
+func prioritizeHumanFeedback(feedback *PRFeedback) {
+	if len(feedback.Items) < 2 {
+		return
 	}
-	return feedback, nil
+	sort.SliceStable(feedback.Items, func(i, j int) bool {
+		return feedbackPriority(feedback.Items[i]) < feedbackPriority(feedback.Items[j])
+	})
+}
+
+func feedbackPriority(item PRFeedbackItem) int {
+	body := strings.TrimSpace(item.Body)
+	if strings.HasPrefix(body, "## Agent review") || strings.Contains(body, "## Agent review\n") {
+		return 3
+	}
+	switch item.Kind {
+	case "review_comment":
+		return 0 // inline code comments from humans are highest priority
+	case "issue_comment":
+		return 1
+	case "review":
+		return 2
+	default:
+		return 4
+	}
 }
 
 func gitWorkingTreeDirty(ctx context.Context, dir string) (bool, error) {
