@@ -22,20 +22,48 @@ GET /api/openapi.yaml
 - Every story belongs to a project.
 - An epic is optional.
 - Story descriptions are Markdown.
-- Intended flow is `backlog -> queued -> in_progress -> done`.
+- Intended flow is `backlog -> queued -> in_progress -> in_review -> done` (autonomous runs may skip visible `in_review` and go straight to `done` after merge).
+- **`done` always means the pull request was merged.** Never mark done solely because a PR was opened.
 - Bots may only set story status to `backlog`, `in_progress`, or `done`.
-- `queued` is currently human-facing and reserved for future agent-pickup work.
+- `queued` and `in_review` are human/orchestrator-only. Bots must not set them.
 - Bots must not close stories. Closing is a manual human review action in the UI.
 - If a user says work is complete, move the story to `done`, not `closed`.
 - Closed stories are hidden from the default board and default story list.
 
+### Status meanings
+
+| Status | Who sets it | Meaning |
+|--------|-------------|---------|
+| `backlog` | human or bot | Not queued |
+| `queued` | human only | In the execution queue |
+| `in_progress` | human, bot, or orchestrator | Active implementation or fix pass |
+| `in_review` | orchestrator / human only | PR open; waiting on a human (supervised) |
+| `done` | human, bot, or orchestrator | Merged |
+| `closed` | human only | Archived after human review |
+
 ## Human-Friendly IDs
 
-Stories use project-prefixed IDs such as `TXG-001` or `RV-001`.
+Stories use project-prefixed IDs such as `ACM-001` or `HBR-001`.
 
 Projects have a required prefix. When creating a project through a story request, provide `projectPrefix` if the user has a clear preference. If no prefix is known, choose a short uppercase prefix from the project name.
 
 Projects may also have a `workingDirectory`. Use the Git repository root, or the folder where Codex should start work for that project. If a project already exists without a working directory, providing one in a later project or story request fills it in. Existing working directories are not overwritten silently.
+
+Projects may set `autonomyMode` to `autonomous` (default) or `supervised`. Autonomous runs implement, review, and merge without waiting. Supervised runs implement, open a PR, post an agent review, then stop with the story in `in_review` until a human acts: address review comments, merge the PR (with quality gate), or sync if the PR was already merged on GitHub. Invalid values are stored as `autonomous`. Agents cannot set status to `in_review`, `queued`, or `closed`.
+
+Optional delivery fields (all have safe defaults that preserve current behavior):
+
+| Field | Default | Effect |
+|-------|---------|--------|
+| `defaultBranchOverride` | empty (auto-detect) | Checkout branch before runs when auto-detect is wrong |
+| `prBaseBranch` | empty (use default branch) | `gh pr create --base` |
+| `qualityGateMode` | `strict` | `strict` fails the run/merge on check errors; `warn` logs and continues |
+| `deleteBranchOnMerge` | `true` | Delete the feature branch on GitHub and locally after merge |
+| `branchNameTemplate` | `ripple/{id}-{slug}` | Feature branch name; placeholders `{id}`, `{slug}`, `{prefix}` (must include `{id}`) |
+
+### Global agent settings (UI only)
+
+Implementer and Reviewer bindings live on the **Settings** page (app-wide, not per project). The Bot API does not configure agents. Defaults: Codex CLI implements; Grok CLI reviews. Either CLI may fill either role (including both). An OpenAI-compatible HTTP provider may be selected as Reviewer only.
 
 ## Create a Project
 
@@ -46,12 +74,20 @@ POST /api/projects
 Content-Type: application/json
 
 {
-  "id": "txgarage",
-  "name": "TXGarage",
-  "prefix": "TXG",
-  "workingDirectory": "/Users/adamm/Documents/WEBPROJECTS/Sites and Apps/TXGarage"
+  "id": "acme",
+  "name": "Acme",
+  "prefix": "ACM",
+  "workingDirectory": "/path/to/acme",
+  "autonomyMode": "autonomous",
+  "defaultBranchOverride": "",
+  "prBaseBranch": "",
+  "qualityGateMode": "strict",
+  "deleteBranchOnMerge": true,
+  "branchNameTemplate": "ripple/{id}-{slug}"
 }
 ```
+
+`autonomyMode` is optional. Omit it (or pass an empty/invalid value) to default to `autonomous`. Delivery fields above are optional on create.
 
 ## Create an Epic
 
@@ -62,9 +98,9 @@ POST /api/epics
 Content-Type: application/json
 
 {
-  "projectId": "txgarage",
-  "name": "Mobile polish",
-  "description": "Cleanup work for the mobile experience."
+  "projectId": "acme",
+  "name": "Onboarding polish",
+  "description": "Cleanup work for the first-run experience."
 }
 ```
 
@@ -79,9 +115,9 @@ POST /api/stories
 Content-Type: application/json
 
 {
-  "projectId": "txgarage",
-  "title": "Add saved vehicle filter",
-  "description": "Add a filter so users can view saved vehicles only.",
+  "projectId": "acme",
+  "title": "Add dark mode toggle",
+  "description": "Add a setting so users can switch between light and dark themes.",
   "status": "backlog"
 }
 ```
@@ -93,12 +129,12 @@ POST /api/stories
 Content-Type: application/json
 
 {
-  "projectName": "Real View",
-  "projectPrefix": "RV",
-  "workingDirectory": "/Users/adamm/Documents/WEBPROJECTS/Sites and Apps/RealView",
-  "epicName": "Listing workflow",
-  "title": "Show listing preview before publish",
-  "description": "Render a Markdown-friendly preview of the listing before it goes live."
+  "projectName": "Harbor",
+  "projectPrefix": "HBR",
+  "workingDirectory": "/path/to/harbor",
+  "epicName": "Notifications",
+  "title": "Send weekly email digests",
+  "description": "Batch unread activity into a weekly email for subscribed users."
 }
 ```
 
@@ -115,10 +151,10 @@ GET /api/stories
 Filter by project, epic, or status:
 
 ```http
-GET /api/stories?projectId=txgarage
-GET /api/stories?epicId=txgarage-mobile-polish
+GET /api/stories?projectId=acme
+GET /api/stories?epicId=acme-onboarding-polish
 GET /api/stories?status=in_progress
-GET /api/stories?projectId=txgarage&status=backlog
+GET /api/stories?projectId=acme&status=backlog
 ```
 
 Include closed stories only when the user specifically asks for archived or closed work:
@@ -132,7 +168,7 @@ GET /api/stories?showClosed=1
 Use this to change title, description, or epic.
 
 ```http
-PATCH /api/stories/TXG-001
+PATCH /api/stories/ACM-001
 Content-Type: application/json
 
 {
@@ -145,7 +181,7 @@ Content-Type: application/json
 Use this to move work through the bot-writable workflow.
 
 ```http
-PATCH /api/stories/TXG-001/status
+PATCH /api/stories/ACM-001/status
 Content-Type: application/json
 
 {
@@ -159,12 +195,12 @@ Allowed bot statuses:
 - `in_progress`
 - `done`
 
-Do not attempt to set `closed`; the API rejects it.
+Do not attempt to set `queued`, `in_review`, or `closed`; the API rejects them.
 
 ## Event History
 
 Use this when you need to understand what happened to a story.
 
 ```http
-GET /api/stories/TXG-001/events
+GET /api/stories/ACM-001/events
 ```

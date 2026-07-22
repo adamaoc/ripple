@@ -21,7 +21,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -36,14 +35,26 @@ const (
 	StatusBacklog    = "backlog"
 	StatusQueued     = "queued"
 	StatusInProgress = "in_progress"
+	StatusInReview   = "in_review"
 	StatusDone       = "done"
 	StatusClosed     = "closed"
+
+	AutonomyAutonomous = "autonomous"
+	AutonomySupervised = "supervised"
+
+	QueueItemAwaitingHuman = "awaiting_human"
+	QueueItemCompleted     = "completed"
+	QueueItemFailed        = "failed"
+	QueueItemRunning       = "running"
+	QueueItemStopped       = "stopped"
+	QueueItemSkipped       = "skipped"
 )
 
 var validStatuses = map[string]bool{
 	StatusBacklog:    true,
 	StatusQueued:     true,
 	StatusInProgress: true,
+	StatusInReview:   true,
 	StatusDone:       true,
 	StatusClosed:     true,
 }
@@ -52,6 +63,7 @@ var uiWritableStatuses = map[string]bool{
 	StatusBacklog:    true,
 	StatusQueued:     true,
 	StatusInProgress: true,
+	StatusInReview:   true,
 	StatusDone:       true,
 }
 
@@ -72,14 +84,27 @@ type App struct {
 }
 
 type Project struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	Prefix           string    `json:"prefix"`
-	WorkingDirectory string    `json:"workingDirectory"`
-	NextStoryNumber  int       `json:"nextStoryNumber"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	ID                    string    `json:"id"`
+	Name                  string    `json:"name"`
+	Prefix                string    `json:"prefix"`
+	WorkingDirectory      string    `json:"workingDirectory"`
+	AutonomyMode          string    `json:"autonomyMode"`
+	DefaultBranchOverride string    `json:"defaultBranchOverride"`
+	PRBaseBranch          string    `json:"prBaseBranch"`
+	QualityGateMode       string    `json:"qualityGateMode"`
+	DeleteBranchOnMerge   bool      `json:"deleteBranchOnMerge"`
+	BranchNameTemplate    string    `json:"branchNameTemplate"`
+	NextStoryNumber       int       `json:"nextStoryNumber"`
+	CreatedAt             time.Time `json:"createdAt"`
+	UpdatedAt             time.Time `json:"updatedAt"`
 }
+
+const (
+	QualityGateStrict         = "strict"
+	QualityGateWarn           = "warn"
+	DefaultBranchNameTemplate = "ripple/{id}-{slug}"
+	eventQualityGateWarned    = "quality_gate_warned"
+)
 
 type Epic struct {
 	ID          string    `json:"id"`
@@ -138,8 +163,9 @@ type BoardData struct {
 }
 
 type StoryPanelData struct {
-	Story  Story
-	Events []StoryEvent
+	Story    Story
+	Events   []StoryEvent
+	Pipeline *StoryPipeline
 }
 
 type DashboardData struct {
@@ -167,19 +193,23 @@ type AgentStatus struct {
 }
 
 type AgentPanelData struct {
-	Status              AgentStatus
-	QueuedCount         int
-	MissingPathProjects []Project
-	Activity            AgentActivityData
+	Status                 AgentStatus
+	QueuedCount            int
+	MissingPathProjects    []Project
+	Activity               AgentActivityData
+	ActionError            string
+	ActionErrorAgentsLink  bool
 }
 
 type FolderPickerData struct {
-	Project     Project
-	Path        string
-	Parent      string
-	Home        string
-	Directories []FolderEntry
-	Error       string
+	Project          Project
+	Path             string
+	Parent           string
+	Home             string
+	Directories      []FolderEntry
+	Error            string
+	SuggestedGitRoot string
+	GitRootDiffers   bool
 }
 
 type FolderEntry struct {
@@ -231,16 +261,18 @@ type AgentLogItem struct {
 }
 
 type PageData struct {
-	Page           string
-	Projects       []Project
-	Project        Project
-	Dashboard      DashboardData
-	Backlog        BacklogPageData
-	Run            RunPageData
-	HasDetailStory bool
-	Detail         StoryPanelData
-	CurrentAgent   AgentStatus
-	ActiveRun      QueueRunSummary
+	Page             string
+	Projects         []Project
+	Project          Project
+	Dashboard        DashboardData
+	Backlog          BacklogPageData
+	Run              RunPageData
+	HasDetailStory   bool
+	Detail           StoryPanelData
+	CurrentAgent     AgentStatus
+	ActiveRun        QueueRunSummary
+	SettingsAgents   SettingsAgentsData
+	GitHubIdentity   GitHubIdentityView
 }
 
 type BacklogPageData struct {
@@ -264,12 +296,21 @@ type RunPageData struct {
 	MissingPath bool
 	Legacy      bool
 	Summary     RunCompletionSummary
+	// ActionError is a user-facing message from a failed UI action (query ?error=).
+	ActionError string
+	// ActionErrorAgentsLink shows a Settings → Agents shortcut for tooling/config errors.
+	ActionErrorAgentsLink bool
 }
 
 type RunCompletionSummary struct {
-	Elapsed      string
-	AgentSteps   int
-	PullRequests []RunPullRequest
+	Elapsed            string
+	AgentSteps         int
+	PullRequests       []RunPullRequest
+	MergedPRs          []RunPullRequest
+	AwaitingHumanPRs   []RunPullRequest
+	OpenPRs            []RunPullRequest
+	MergedCount        int
+	AwaitingHumanCount int
 }
 
 type RunPullRequest struct {
@@ -278,6 +319,11 @@ type RunPullRequest struct {
 	Number     int
 	URL        string
 	Branch     string
+	// Outcome is "merged", "awaiting_human", or "open" for run completion UI.
+	Outcome string
+	// HasMergeConflict disables merge and surfaces a warning for awaiting-human PRs.
+	HasMergeConflict bool
+	ConflictDetail   string
 }
 
 type ProjectDashboard struct {
@@ -290,6 +336,7 @@ type StatusCounts struct {
 	Backlog    int
 	Queued     int
 	InProgress int
+	InReview   int
 	Done       int
 	Closed     int
 	Total      int
@@ -333,10 +380,12 @@ func main() {
 func NewApp(db *sql.DB) (*App, error) {
 	db.SetMaxOpenConns(1)
 	funcs := template.FuncMap{
-		"statusTitle":   statusTitle,
-		"runKindTitle":  runKindTitle,
-		"runKindSource": runKindSource,
-		"truncateText":  truncate,
+		"statusTitle":          statusTitle,
+		"runKindTitle":         runKindTitle,
+		"runKindSource":        runKindSource,
+		"eventTitle":           eventTitle,
+		"queueItemStatusTitle": queueItemStatusTitle,
+		"truncateText":         truncate,
 		"markdown": func(s string) template.HTML {
 			var buf bytes.Buffer
 			if err := goldmark.Convert([]byte(s), &buf); err != nil {
@@ -366,6 +415,12 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /", a.handleDashboard)
 	mux.HandleFunc("GET /about", a.handleAbout)
 	mux.HandleFunc("GET /settings", a.handleSettings)
+	mux.HandleFunc("POST /settings/agents", a.handleUIAgentSettings)
+	mux.HandleFunc("POST /settings/github-identity", a.handleUIGitHubIdentity)
+	mux.HandleFunc("POST /settings/agents/api-providers", a.handleUICreateAPIProvider)
+	mux.HandleFunc("POST /settings/agents/api-providers/{id}", a.handleUIUpdateAPIProvider)
+	mux.HandleFunc("POST /settings/agents/api-providers/{id}/delete", a.handleUIDeleteAPIProvider)
+	mux.HandleFunc("POST /settings/agents/api-providers/{id}/test", a.handleUITestAPIProvider)
 	mux.HandleFunc("GET /board", a.handleBoardPartial)
 	mux.HandleFunc("GET /projects/{id}/backlog", a.handleProjectBacklog)
 	mux.HandleFunc("GET /projects/{id}/run", a.handleProjectRun)
@@ -375,10 +430,19 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /stories/{id}/panel", a.handleStoryPanel)
 	mux.HandleFunc("POST /stories/{id}/status", a.handleUIStatus)
 	mux.HandleFunc("POST /stories/{id}/description", a.handleUIDescription)
+	mux.HandleFunc("POST /stories/{id}/address-feedback", a.handleUIAddressFeedback)
+	mux.HandleFunc("POST /stories/{id}/resolve-conflicts", a.handleUIResolveConflicts)
+	mux.HandleFunc("POST /stories/{id}/merge", a.handleUIMergeStory)
+	mux.HandleFunc("POST /stories/{id}/sync-pr", a.handleUISyncPR)
 	mux.HandleFunc("POST /stories/{id}/close", a.handleUIClose)
 	mux.HandleFunc("POST /stories/close-done", a.handleUICloseDone)
 	mux.HandleFunc("POST /stories/queue-backlog", a.handleUIQueueBacklog)
 	mux.HandleFunc("POST /projects/{id}/working-directory", a.handleUIProjectWorkingDirectory)
+	mux.HandleFunc("POST /projects/{id}/settings", a.handleUIProjectSettings)
+	mux.HandleFunc("GET /projects/{id}/setup-status", a.handleProjectSetupStatus)
+	mux.HandleFunc("POST /projects/{id}/use-git-root", a.handleUIUseGitRoot)
+	mux.HandleFunc("POST /projects/{id}/clone", a.handleUICloneRepo)
+	mux.HandleFunc("POST /projects", a.handleUICreateProject)
 	mux.HandleFunc("GET /folder-picker", a.handleUIFolderPicker)
 	mux.HandleFunc("POST /agent/run-queue", a.handleUIRunQueue)
 	mux.HandleFunc("POST /agent/stop", a.handleUIStopAgent)
@@ -418,7 +482,118 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	a.render(w, "layout.html", PageData{Page: "settings", Projects: projects, CurrentAgent: a.currentAgentStatus()})
+	flash := strings.TrimSpace(r.URL.Query().Get("flash"))
+	agents, err := a.settingsAgentsData(r.Context(), flash)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	ghIdentity, err := a.githubIdentityView(r.Context(), flash)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	a.render(w, "layout.html", PageData{
+		Page:           "settings",
+		Projects:       projects,
+		CurrentAgent:   a.currentAgentStatus(),
+		SettingsAgents: agents,
+		GitHubIdentity: ghIdentity,
+	})
+}
+
+func (a *App) handleUIAgentSettings(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		httpError(w, err)
+		return
+	}
+	err := a.saveAgentSettingsFromForm(r.Context(),
+		r.FormValue("implementerProviderId"),
+		r.FormValue("reviewerProviderId"),
+		r.FormValue("codexBinaryPath"),
+		r.FormValue("grokBinaryPath"),
+	)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/settings?flash=saved#agents", http.StatusSeeOther)
+}
+
+func (a *App) handleUIGitHubIdentity(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		httpError(w, err)
+		return
+	}
+	form := map[string]string{
+		"prAuthorMode":  r.FormValue("prAuthorMode"),
+		"commitMode":    r.FormValue("commitMode"),
+		"commentMode":   r.FormValue("commentMode"),
+		"commitName":    r.FormValue("commitName"),
+		"commitEmail":   r.FormValue("commitEmail"),
+		"humanName":     r.FormValue("humanName"),
+		"humanEmail":    r.FormValue("humanEmail"),
+		"botToken":      r.FormValue("botToken"),
+		"clearBotToken": r.FormValue("clearBotToken"),
+	}
+	if err := a.saveGitHubIdentityFromForm(r.Context(), form); err != nil {
+		httpError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/settings?flash=github_saved#github-identity", http.StatusSeeOther)
+}
+
+func (a *App) handleUICreateAPIProvider(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		httpError(w, err)
+		return
+	}
+	_, err := a.createAPIProvider(r.Context(),
+		r.FormValue("name"),
+		r.FormValue("baseUrl"),
+		r.FormValue("apiKey"),
+		r.FormValue("model"),
+	)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/settings?flash=api_saved#api-providers", http.StatusSeeOther)
+}
+
+func (a *App) handleUIUpdateAPIProvider(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		httpError(w, err)
+		return
+	}
+	err := a.updateAPIProvider(r.Context(), r.PathValue("id"),
+		r.FormValue("name"),
+		r.FormValue("baseUrl"),
+		r.FormValue("apiKey"),
+		r.FormValue("model"),
+	)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/settings?flash=api_saved#api-providers", http.StatusSeeOther)
+}
+
+func (a *App) handleUIDeleteAPIProvider(w http.ResponseWriter, r *http.Request) {
+	if err := a.deleteAPIProvider(r.Context(), r.PathValue("id")); err != nil {
+		httpError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/settings?flash=api_deleted#api-providers", http.StatusSeeOther)
+}
+
+func (a *App) handleUITestAPIProvider(w http.ResponseWriter, r *http.Request) {
+	if err := a.testAPIProviderConnection(r.Context(), r.PathValue("id")); err != nil {
+		// Surface a soft redirect with failure flash rather than raw JSON for form posts.
+		http.Redirect(w, r, "/settings?flash=api_test_failed#api-providers", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/settings?flash=api_tested#api-providers", http.StatusSeeOther)
 }
 
 func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -505,12 +680,12 @@ func (a *App) projectBacklogPageData(r *http.Request) (PageData, error) {
 	if storyID := strings.TrimSpace(r.URL.Query().Get("storyId")); storyID != "" {
 		story, err := a.getStory(r.Context(), storyID)
 		if err == nil && story.ProjectID == project.ID {
-			events, eventErr := a.listEvents(r.Context(), story.ID)
-			if eventErr != nil {
-				return PageData{}, eventErr
+			panel, panelErr := a.storyPanelData(r.Context(), story.ID)
+			if panelErr != nil {
+				return PageData{}, panelErr
 			}
 			data.HasDetailStory = true
-			data.Detail = StoryPanelData{Story: story, Events: events}
+			data.Detail = panel
 		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return PageData{}, err
 		}
@@ -573,7 +748,12 @@ func (a *App) projectRunPageData(r *http.Request) (PageData, error) {
 	if err != nil {
 		return PageData{}, err
 	}
-	runData := RunPageData{Project: project, Run: selected, Runs: runs, LiveQueue: queued, Agent: a.currentAgentStatus(), MissingPath: strings.TrimSpace(project.WorkingDirectory) == ""}
+	actionError := strings.TrimSpace(r.URL.Query().Get("error"))
+	runData := RunPageData{
+		Project: project, Run: selected, Runs: runs, LiveQueue: queued,
+		Agent: a.currentAgentStatus(), MissingPath: strings.TrimSpace(project.WorkingDirectory) == "",
+		ActionError: actionError, ActionErrorAgentsLink: actionErrorNeedsAgentsSettings(actionError),
+	}
 	if selected.ID != 0 {
 		runData.Items, err = a.listQueueRunItems(r.Context(), selected.ID)
 		if err != nil {
@@ -598,15 +778,68 @@ func (a *App) projectRunPageData(r *http.Request) (PageData, error) {
 				}
 			}
 		}
-		runData.Summary = buildRunCompletionSummary(selected, runData.Activity.StoryRuns)
+		runData.Summary = buildRunCompletionSummary(selected, runData.Activity.StoryRuns, runData.Items)
+		a.enrichAwaitingPRConflicts(r.Context(), selected.ID, &runData.Summary)
 	}
 	return PageData{Page: "run", Projects: projects, Project: project, Run: runData, CurrentAgent: a.currentAgentStatus()}, nil
 }
 
-func buildRunCompletionSummary(run QueueRunSummary, storyRuns []AgentRunSummary) RunCompletionSummary {
+func (a *App) enrichAwaitingPRConflicts(ctx context.Context, queueRunID int64, summary *RunCompletionSummary) {
+	if summary == nil || queueRunID == 0 {
+		return
+	}
+	items, err := a.listQueueRunItems(ctx, queueRunID)
+	if err != nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, pr := range summary.AwaitingHumanPRs {
+		seen[pr.StoryID] = true
+	}
+	for _, item := range items {
+		if item.Status != QueueItemAwaitingHuman {
+			continue
+		}
+		pipeline, err := a.getStoryPipeline(ctx, queueRunID, item.Story.ID)
+		if err != nil || pipeline.PRNumber <= 0 {
+			continue
+		}
+		if !seen[item.Story.ID] {
+			summary.AwaitingHumanPRs = append(summary.AwaitingHumanPRs, RunPullRequest{
+				StoryID: item.Story.ID, StoryTitle: item.Story.Title,
+				Number: pipeline.PRNumber, URL: pipeline.PRURL, Branch: pipeline.Branch,
+				Outcome: "awaiting_human",
+			})
+			seen[item.Story.ID] = true
+			if summary.AwaitingHumanCount == 0 {
+				// Count is derived separately from items; leave as-is.
+			}
+		}
+	}
+	for i := range summary.AwaitingHumanPRs {
+		pr := &summary.AwaitingHumanPRs[i]
+		pipeline, err := a.getStoryPipeline(ctx, queueRunID, pr.StoryID)
+		if err != nil {
+			continue
+		}
+		if pipeline.MergeConflict {
+			pr.HasMergeConflict = true
+			pr.ConflictDetail = strings.TrimSpace(pipeline.Error)
+			if pr.ConflictDetail == "" {
+				pr.ConflictDetail = "Pull request has merge conflicts with the base branch"
+			}
+		}
+	}
+}
+
+func buildRunCompletionSummary(run QueueRunSummary, storyRuns []AgentRunSummary, items []QueueRunItem) RunCompletionSummary {
 	summary := RunCompletionSummary{AgentSteps: len(storyRuns)}
 	if run.FinishedAt != nil {
 		summary.Elapsed = formatElapsed(run.FinishedAt.Sub(run.StartedAt))
+	}
+	itemStatus := map[string]string{}
+	for _, item := range items {
+		itemStatus[item.Story.ID] = item.Status
 	}
 	seen := map[string]bool{}
 	for _, storyRun := range storyRuns {
@@ -618,11 +851,39 @@ func buildRunCompletionSummary(run QueueRunSummary, storyRuns []AgentRunSummary)
 			continue
 		}
 		seen[key] = true
-		summary.PullRequests = append(summary.PullRequests, RunPullRequest{
-			StoryID: storyRun.StoryID, StoryTitle: storyRun.StoryTitle, Number: storyRun.PRNumber, URL: storyRun.PRURL, Branch: storyRun.Branch,
-		})
+		outcome := prOutcomeForRunItem(itemStatus[storyRun.StoryID])
+		pr := RunPullRequest{
+			StoryID: storyRun.StoryID, StoryTitle: storyRun.StoryTitle, Number: storyRun.PRNumber, URL: storyRun.PRURL, Branch: storyRun.Branch, Outcome: outcome,
+		}
+		summary.PullRequests = append(summary.PullRequests, pr)
+		switch outcome {
+		case "merged":
+			summary.MergedPRs = append(summary.MergedPRs, pr)
+			summary.MergedCount++
+		case "awaiting_human":
+			summary.AwaitingHumanPRs = append(summary.AwaitingHumanPRs, pr)
+		default:
+			summary.OpenPRs = append(summary.OpenPRs, pr)
+		}
+	}
+	// Prefer queue-item outcomes for "waiting on you" so the count matches the sidebar.
+	for _, item := range items {
+		if item.Status == QueueItemAwaitingHuman {
+			summary.AwaitingHumanCount++
+		}
 	}
 	return summary
+}
+
+func prOutcomeForRunItem(itemStatus string) string {
+	switch itemStatus {
+	case QueueItemAwaitingHuman:
+		return "awaiting_human"
+	case QueueItemCompleted:
+		return "merged"
+	default:
+		return "open"
+	}
 }
 
 func formatElapsed(duration time.Duration) string {
@@ -650,6 +911,7 @@ func (a *App) migrate(ctx context.Context) error {
 			name TEXT NOT NULL,
 			prefix TEXT NOT NULL UNIQUE,
 			working_directory TEXT NOT NULL DEFAULT '',
+			autonomy_mode TEXT NOT NULL DEFAULT 'autonomous',
 			next_story_number INTEGER NOT NULL DEFAULT 1,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
@@ -745,6 +1007,24 @@ func (a *App) migrate(ctx context.Context) error {
 	if err := a.ensureColumn(ctx, "projects", "working_directory", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := a.ensureColumn(ctx, "projects", "autonomy_mode", "TEXT NOT NULL DEFAULT 'autonomous'"); err != nil {
+		return err
+	}
+	if err := a.ensureColumn(ctx, "projects", "default_branch_override", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := a.ensureColumn(ctx, "projects", "pr_base_branch", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := a.ensureColumn(ctx, "projects", "quality_gate_mode", "TEXT NOT NULL DEFAULT 'strict'"); err != nil {
+		return err
+	}
+	if err := a.ensureColumn(ctx, "projects", "delete_branch_on_merge", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := a.ensureColumn(ctx, "projects", "branch_name_template", "TEXT NOT NULL DEFAULT 'ripple/{id}-{slug}'"); err != nil {
+		return err
+	}
 	if err := a.ensureColumn(ctx, "stories", "queue_position", "INTEGER"); err != nil {
 		return err
 	}
@@ -765,6 +1045,15 @@ func (a *App) migrate(ctx context.Context) error {
 		if err := a.ensureColumn(ctx, "agent_runs", column, definition); err != nil {
 			return err
 		}
+	}
+	if err := a.ensureColumn(ctx, "story_pipelines", "merge_conflict", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := a.ensureAgentSettings(ctx); err != nil {
+		return err
+	}
+	if err := a.ensureGitHubIdentityColumn(ctx); err != nil {
+		return err
 	}
 	return nil
 }
@@ -828,18 +1117,102 @@ func (a *App) finishUIAction(w http.ResponseWriter, r *http.Request) {
 	a.renderBoardPartial(w, r)
 }
 
+// finishUIActionError redirects form POSTs back to redirect with ?error=… when possible,
+// instead of dumping a raw JSON error page (which abandons the user on /stories/.../merge).
+func (a *App) finishUIActionError(w http.ResponseWriter, r *http.Request, err error) {
+	redirect := strings.TrimSpace(r.FormValue("redirect"))
+	if strings.HasPrefix(redirect, "/") && !strings.HasPrefix(redirect, "//") {
+		msg := err.Error()
+		var ce clientError
+		if errors.As(err, &ce) {
+			msg = ce.message
+		}
+		// Cap length so the URL stays usable.
+		msg = truncate(msg, 280)
+		sep := "?"
+		if strings.Contains(redirect, "?") {
+			sep = "&"
+		}
+		http.Redirect(w, r, redirect+sep+"error="+url.QueryEscape(msg), http.StatusSeeOther)
+		return
+	}
+	httpError(w, err)
+}
+
 func (a *App) handleStoryPanel(w http.ResponseWriter, r *http.Request) {
-	story, err := a.getStory(r.Context(), r.PathValue("id"))
+	data, err := a.storyPanelData(r.Context(), r.PathValue("id"))
 	if err != nil {
 		httpError(w, err)
 		return
 	}
-	events, err := a.listEvents(r.Context(), story.ID)
+	a.render(w, "story_panel.html", data)
+}
+
+func (a *App) storyPanelData(ctx context.Context, storyID string) (StoryPanelData, error) {
+	story, err := a.getStory(ctx, storyID)
 	if err != nil {
-		httpError(w, err)
+		return StoryPanelData{}, err
+	}
+	events, err := a.listEvents(ctx, story.ID)
+	if err != nil {
+		return StoryPanelData{}, err
+	}
+	data := StoryPanelData{Story: story, Events: events}
+	if pipeline, err := a.getLatestStoryPipeline(ctx, story.ID); err == nil {
+		p := pipeline
+		data.Pipeline = &p
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return StoryPanelData{}, err
+	}
+	return data, nil
+}
+
+func (a *App) handleUIAddressFeedback(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		a.finishUIActionError(w, r, err)
 		return
 	}
-	a.render(w, "story_panel.html", StoryPanelData{story, events})
+	if err := a.startAddressFeedback(r.PathValue("id"), requestBaseURL(r)); err != nil {
+		a.finishUIActionError(w, r, err)
+		return
+	}
+	a.finishUIAction(w, r)
+}
+
+func (a *App) handleUIResolveConflicts(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		a.finishUIActionError(w, r, err)
+		return
+	}
+	if err := a.startResolveConflicts(r.PathValue("id"), requestBaseURL(r)); err != nil {
+		a.finishUIActionError(w, r, err)
+		return
+	}
+	a.finishUIAction(w, r)
+}
+
+func (a *App) handleUIMergeStory(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		a.finishUIActionError(w, r, err)
+		return
+	}
+	if err := a.startHumanMerge(r.PathValue("id")); err != nil {
+		a.finishUIActionError(w, r, err)
+		return
+	}
+	a.finishUIAction(w, r)
+}
+
+func (a *App) handleUISyncPR(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		a.finishUIActionError(w, r, err)
+		return
+	}
+	if err := a.syncExternalPRMerge(r.Context(), r.PathValue("id")); err != nil {
+		a.finishUIActionError(w, r, err)
+		return
+	}
+	a.finishUIAction(w, r)
 }
 
 func (a *App) handleUIStatus(w http.ResponseWriter, r *http.Request) {
@@ -849,7 +1222,7 @@ func (a *App) handleUIStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	status := r.FormValue("status")
 	if !uiWritableStatuses[status] {
-		httpError(w, badRequest("UI status changes may use backlog, queued, in_progress, or done; use close for closed"))
+		httpError(w, badRequest("UI status changes may use backlog, queued, in_progress, in_review, or done; use close for closed"))
 		return
 	}
 	if err := a.changeStoryStatus(r.Context(), r.PathValue("id"), status, false, "Updated from board UI"); err != nil {
@@ -1000,6 +1373,100 @@ func (a *App) handleUIProjectWorkingDirectory(w http.ResponseWriter, r *http.Req
 	a.finishUIAction(w, r)
 }
 
+func (a *App) handleUIProjectSettings(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		httpError(w, err)
+		return
+	}
+	id := r.PathValue("id")
+	if _, ok := r.Form["workingDirectory"]; ok {
+		if err := a.updateProjectWorkingDirectory(r.Context(), id, r.FormValue("workingDirectory")); err != nil {
+			httpError(w, err)
+			return
+		}
+	}
+	if _, ok := r.Form["autonomyMode"]; ok {
+		if err := a.updateProjectAutonomyMode(r.Context(), id, r.FormValue("autonomyMode")); err != nil {
+			httpError(w, err)
+			return
+		}
+	}
+	// Delivery settings: only update when the form includes the section marker.
+	if _, ok := r.Form["deliverySettings"]; ok {
+		deleteBranch := r.FormValue("deleteBranchOnMerge") == "1" || strings.EqualFold(r.FormValue("deleteBranchOnMerge"), "on") || strings.EqualFold(r.FormValue("deleteBranchOnMerge"), "true")
+		// Checkbox: if form has deliverySettings but no deleteBranchOnMerge field, treat as false.
+		if _, present := r.Form["deleteBranchOnMerge"]; !present {
+			deleteBranch = false
+		}
+		if err := a.updateProjectDeliverySettings(r.Context(), id, projectDeliverySettings{
+			DefaultBranchOverride: r.FormValue("defaultBranchOverride"),
+			PRBaseBranch:          r.FormValue("prBaseBranch"),
+			QualityGateMode:       r.FormValue("qualityGateMode"),
+			DeleteBranchOnMerge:   deleteBranch,
+			BranchNameTemplate:    r.FormValue("branchNameTemplate"),
+		}); err != nil {
+			httpError(w, err)
+			return
+		}
+	}
+	a.finishUIAction(w, r)
+}
+
+func (a *App) handleProjectSetupStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := a.projectSetupStatus(r.Context(), r.PathValue("id"))
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	accept := r.Header.Get("Accept")
+	if strings.Contains(accept, "application/json") && !strings.Contains(accept, "text/html") {
+		writeJSON(w, http.StatusOK, status)
+		return
+	}
+	a.render(w, "setup_status.html", status)
+}
+
+func (a *App) handleUIUseGitRoot(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		httpError(w, err)
+		return
+	}
+	if _, err := a.useGitRootForProject(r.Context(), r.PathValue("id")); err != nil {
+		httpError(w, err)
+		return
+	}
+	a.finishUIAction(w, r)
+}
+
+func (a *App) handleUICloneRepo(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		httpError(w, err)
+		return
+	}
+	if _, err := a.cloneGitHubRepo(r.Context(), r.PathValue("id"), r.FormValue("repoUrl"), r.FormValue("parentDirectory")); err != nil {
+		httpError(w, err)
+		return
+	}
+	a.finishUIAction(w, r)
+}
+
+func (a *App) handleUICreateProject(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		httpError(w, err)
+		return
+	}
+	name := strings.TrimSpace(r.FormValue("name"))
+	prefix := strings.TrimSpace(r.FormValue("prefix"))
+	workingDirectory := strings.TrimSpace(r.FormValue("workingDirectory"))
+	autonomyMode := r.FormValue("autonomyMode")
+	project, err := a.createProject(r.Context(), "", name, prefix, workingDirectory, autonomyMode)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/projects/"+project.ID+"/backlog", http.StatusSeeOther)
+}
+
 func (a *App) handleUIFolderPicker(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.URL.Query().Get("projectId"))
 	if projectID == "" {
@@ -1090,10 +1557,71 @@ func (a *App) handleUIRunQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	baseURL := requestBaseURL(r)
 	if err := a.startAgentQueueRun(r.Context(), filters, baseURL); err != nil {
-		httpError(w, err)
+		a.finishUIStartRunError(w, r, err)
 		return
 	}
 	a.finishUIAction(w, r)
+}
+
+// finishUIStartRunError keeps the user in the UI when Start run fails (redirect banner,
+// HTMX agent controls, or settings shortcut) instead of dumping a raw JSON error page.
+func (a *App) finishUIStartRunError(w http.ResponseWriter, r *http.Request, err error) {
+	msg := err.Error()
+	var ce clientError
+	if errors.As(err, &ce) {
+		msg = ce.message
+	}
+	agentsLink := actionErrorNeedsAgentsSettings(msg)
+
+	redirect := strings.TrimSpace(r.FormValue("redirect"))
+	if strings.HasPrefix(redirect, "/") && !strings.HasPrefix(redirect, "//") {
+		a.finishUIActionError(w, r, err)
+		return
+	}
+
+	if r.Header.Get("HX-Request") != "" {
+		panel, panelErr := a.agentPanelDataForRequest(r)
+		if panelErr != nil {
+			httpError(w, err)
+			return
+		}
+		panel.ActionError = truncate(msg, 280)
+		panel.ActionErrorAgentsLink = agentsLink
+		w.Header().Set("HX-Retarget", "#agent-run-controls")
+		w.Header().Set("HX-Reswap", "outerHTML")
+		a.render(w, "agent_run_controls.html", panel)
+		return
+	}
+
+	if agentsLink {
+		http.Redirect(w, r, "/settings#agents", http.StatusSeeOther)
+		return
+	}
+	httpError(w, err)
+}
+
+func actionErrorNeedsAgentsSettings(msg string) bool {
+	lower := strings.ToLower(strings.TrimSpace(msg))
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, "settings") && strings.Contains(lower, "agent") {
+		return true
+	}
+	for _, needle := range []string{
+		"cli was not found",
+		"not available",
+		"not configured",
+		"no api key",
+		"missing base url",
+		"ripple_codex_bin",
+		"ripple_grok_bin",
+	} {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) handleUIStopAgent(w http.ResponseWriter, r *http.Request) {
@@ -1110,9 +1638,10 @@ func (a *App) handleAPIRoot(w http.ResponseWriter, r *http.Request) {
 		"docs":    "/api/docs",
 		"openapi": "/api/openapi.yaml",
 		"rules": map[string]any{
-			"intendedStatusFlow":  []string{StatusBacklog, StatusQueued, StatusInProgress, StatusDone},
+			"intendedStatusFlow":  []string{StatusBacklog, StatusQueued, StatusInProgress, StatusInReview, StatusDone},
 			"botWritableStatuses": []string{StatusBacklog, StatusInProgress, StatusDone},
 			"closed":              "Closed is manual-only. Bots should move finished work to done.",
+			"in_review":           "in_review is orchestrator/human-only (supervised delivery). Bots cannot set it.",
 			"projectRequired":     true,
 			"epicRequired":        false,
 			"descriptions":        "Markdown",
@@ -1158,19 +1687,52 @@ func (a *App) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, projects)
 	case http.MethodPost:
 		var req struct {
-			ID               string `json:"id"`
-			Name             string `json:"name"`
-			Prefix           string `json:"prefix"`
-			WorkingDirectory string `json:"workingDirectory"`
+			ID                    string `json:"id"`
+			Name                  string `json:"name"`
+			Prefix                string `json:"prefix"`
+			WorkingDirectory      string `json:"workingDirectory"`
+			AutonomyMode          string `json:"autonomyMode"`
+			DefaultBranchOverride string `json:"defaultBranchOverride"`
+			PRBaseBranch          string `json:"prBaseBranch"`
+			QualityGateMode       string `json:"qualityGateMode"`
+			DeleteBranchOnMerge   *bool  `json:"deleteBranchOnMerge"`
+			BranchNameTemplate    string `json:"branchNameTemplate"`
 		}
 		if err := decodeJSON(r, &req); err != nil {
 			httpError(w, err)
 			return
 		}
-		project, err := a.createProject(r.Context(), req.ID, req.Name, req.Prefix, req.WorkingDirectory)
+		project, err := a.createProject(r.Context(), req.ID, req.Name, req.Prefix, req.WorkingDirectory, req.AutonomyMode)
 		if err != nil {
 			httpError(w, err)
 			return
+		}
+		// Optional delivery fields on create.
+		hasDelivery := strings.TrimSpace(req.DefaultBranchOverride) != "" ||
+			strings.TrimSpace(req.PRBaseBranch) != "" ||
+			strings.TrimSpace(req.QualityGateMode) != "" ||
+			strings.TrimSpace(req.BranchNameTemplate) != "" ||
+			req.DeleteBranchOnMerge != nil
+		if hasDelivery {
+			del := true
+			if req.DeleteBranchOnMerge != nil {
+				del = *req.DeleteBranchOnMerge
+			}
+			if err := a.updateProjectDeliverySettings(r.Context(), project.ID, projectDeliverySettings{
+				DefaultBranchOverride: req.DefaultBranchOverride,
+				PRBaseBranch:          req.PRBaseBranch,
+				QualityGateMode:       req.QualityGateMode,
+				DeleteBranchOnMerge:   del,
+				BranchNameTemplate:    req.BranchNameTemplate,
+			}); err != nil {
+				httpError(w, err)
+				return
+			}
+			project, err = a.getProject(r.Context(), project.ID)
+			if err != nil {
+				httpError(w, err)
+				return
+			}
 		}
 		writeJSON(w, http.StatusCreated, project)
 	}
@@ -1290,7 +1852,7 @@ func (a *App) handleAPIStoryStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !botWritableStatuses[req.Status] {
-		httpError(w, badRequest("bots may only set status to backlog, in_progress, or done; closed is manual-only"))
+		httpError(w, badRequest("bots may only set status to backlog, in_progress, or done; queued, in_review, and closed are not bot-writable"))
 		return
 	}
 	if err := a.changeStoryStatus(r.Context(), r.PathValue("id"), req.Status, false, "Updated through bot API"); err != nil {
@@ -1389,7 +1951,7 @@ func (a *App) createStory(ctx context.Context, req createStoryRequest) (Story, e
 	return a.getStory(ctx, id)
 }
 
-func (a *App) createProject(ctx context.Context, id, name, prefix, workingDirectory string) (Project, error) {
+func (a *App) createProject(ctx context.Context, id, name, prefix, workingDirectory, autonomyMode string) (Project, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return Project{}, badRequest("name is required")
@@ -1406,9 +1968,10 @@ func (a *App) createProject(ctx context.Context, id, name, prefix, workingDirect
 	if err != nil {
 		return Project{}, err
 	}
+	autonomyMode = normalizeAutonomyMode(autonomyMode)
 	now := time.Now().UTC()
-	_, err = a.db.ExecContext(ctx, `INSERT INTO projects (id, name, prefix, working_directory, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, name, prefix, workingDirectory, formatTime(now), formatTime(now))
+	_, err = a.db.ExecContext(ctx, `INSERT INTO projects (id, name, prefix, working_directory, autonomy_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, name, prefix, workingDirectory, autonomyMode, formatTime(now), formatTime(now))
 	if err != nil {
 		if strings.Contains(err.Error(), "constraint") {
 			return Project{}, badRequest("project id or prefix already exists")
@@ -1437,7 +2000,7 @@ func (a *App) ensureProject(ctx context.Context, id, name, prefix, workingDirect
 		if strings.TrimSpace(name) == "" {
 			return Project{}, badRequest("projectId was not found; provide projectName to create it")
 		}
-		return a.createProject(ctx, id, name, prefix, workingDirectory)
+		return a.createProject(ctx, id, name, prefix, workingDirectory, "")
 	}
 	if strings.TrimSpace(name) == "" {
 		return Project{}, badRequest("projectId or projectName is required")
@@ -1456,7 +2019,7 @@ func (a *App) ensureProject(ctx context.Context, id, name, prefix, workingDirect
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Project{}, err
 	}
-	return a.createProject(ctx, generatedID, name, prefix, workingDirectory)
+	return a.createProject(ctx, generatedID, name, prefix, workingDirectory, "")
 }
 
 func (a *App) updateProjectWorkingDirectory(ctx context.Context, id, workingDirectory string) error {
@@ -1470,6 +2033,99 @@ func (a *App) updateProjectWorkingDirectory(ctx context.Context, id, workingDire
 	_, err = a.db.ExecContext(ctx, `UPDATE projects SET working_directory = ?, updated_at = ? WHERE id = ?`,
 		workingDirectory, formatTime(time.Now().UTC()), id)
 	return err
+}
+
+func (a *App) updateProjectAutonomyMode(ctx context.Context, id, autonomyMode string) error {
+	if _, err := a.getProject(ctx, id); err != nil {
+		return err
+	}
+	autonomyMode = normalizeAutonomyMode(autonomyMode)
+	_, err := a.db.ExecContext(ctx, `UPDATE projects SET autonomy_mode = ?, updated_at = ? WHERE id = ?`,
+		autonomyMode, formatTime(time.Now().UTC()), id)
+	return err
+}
+
+type projectDeliverySettings struct {
+	DefaultBranchOverride string
+	PRBaseBranch          string
+	QualityGateMode       string
+	DeleteBranchOnMerge   bool
+	BranchNameTemplate    string
+}
+
+func (a *App) updateProjectDeliverySettings(ctx context.Context, id string, settings projectDeliverySettings) error {
+	if _, err := a.getProject(ctx, id); err != nil {
+		return err
+	}
+	settings.DefaultBranchOverride = sanitizeBranchName(settings.DefaultBranchOverride)
+	settings.PRBaseBranch = sanitizeBranchName(settings.PRBaseBranch)
+	settings.QualityGateMode = normalizeQualityGateMode(settings.QualityGateMode)
+	settings.BranchNameTemplate = normalizeBranchNameTemplate(settings.BranchNameTemplate)
+	deleteFlag := 0
+	if settings.DeleteBranchOnMerge {
+		deleteFlag = 1
+	}
+	_, err := a.db.ExecContext(ctx, `UPDATE projects SET
+		default_branch_override = ?,
+		pr_base_branch = ?,
+		quality_gate_mode = ?,
+		delete_branch_on_merge = ?,
+		branch_name_template = ?,
+		updated_at = ?
+		WHERE id = ?`,
+		settings.DefaultBranchOverride,
+		settings.PRBaseBranch,
+		settings.QualityGateMode,
+		deleteFlag,
+		settings.BranchNameTemplate,
+		formatTime(time.Now().UTC()),
+		id,
+	)
+	return err
+}
+
+func normalizeQualityGateMode(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case QualityGateWarn:
+		return QualityGateWarn
+	default:
+		return QualityGateStrict
+	}
+}
+
+func normalizeBranchNameTemplate(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return DefaultBranchNameTemplate
+	}
+	// Keep templates conservative: placeholders + path-safe chars.
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '{' || r == '}' || r == '/' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return DefaultBranchNameTemplate
+	}
+	if !strings.Contains(s, "{id}") {
+		return DefaultBranchNameTemplate
+	}
+	return s
+}
+
+func sanitizeBranchName(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// Disallow spaces and shell metacharacters; allow typical git branch chars.
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '/' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return ""
+	}
+	return s
 }
 
 func (a *App) folderPickerData(project Project, requestedPath string) (FolderPickerData, error) {
@@ -1506,6 +2162,14 @@ func (a *App) folderPickerData(project Project, requestedPath string) (FolderPic
 		data.Path = home
 		data.Parent = filepath.Dir(home)
 		abs = home
+	} else if isGitWorkTree(abs) {
+		if root, rootErr := detectGitRoot(context.Background(), abs); rootErr == nil {
+			rootAbs, _ := filepath.Abs(root)
+			if rootAbs != "" && rootAbs != abs {
+				data.SuggestedGitRoot = rootAbs
+				data.GitRootDiffers = true
+			}
+		}
 	}
 	entries, err := os.ReadDir(abs)
 	if err != nil {
@@ -2025,10 +2689,10 @@ func (a *App) startAgentQueueRun(ctx context.Context, filters storyFilters, base
 	if len(panel.MissingPathProjects) > 0 {
 		return badRequest("add a project path before running queued stories")
 	}
-	if _, err := resolveCodexBinary(); err != nil {
+	if _, err := a.resolveImplementer(ctx); err != nil {
 		return err
 	}
-	if _, err := resolveGrokBinary(); err != nil {
+	if _, err := a.resolveReviewer(ctx); err != nil {
 		return err
 	}
 	if _, err := resolveGhBinary(); err != nil {
@@ -2108,13 +2772,13 @@ func (a *App) runAgentQueue(ctx context.Context, queueRunID int64, baseURL strin
 			Project:    project,
 			Story:      story,
 		}
-		finalMessage, err := a.runStoryPipeline(ctx, pc, previousSummary)
+		result, err := a.runStoryPipeline(ctx, pc, previousSummary)
 		if err != nil {
 			_ = a.addEvent(ctx, story.ID, "agent_failed", "Story pipeline failed: "+err.Error())
-			status := "failed"
+			status := QueueItemFailed
 			message := "Queue run failed"
 			if errors.Is(err, context.Canceled) {
-				status = "stopped"
+				status = QueueItemStopped
 				message = "Queue run stopped"
 			}
 			_ = a.updateQueueRunItemStatus(context.Background(), queueRunID, story.ID, status)
@@ -2122,23 +2786,45 @@ func (a *App) runAgentQueue(ctx context.Context, queueRunID int64, baseURL strin
 			a.finishAgentRun(context.Background(), queueRunID, status, message, completed, fmt.Errorf("%s failed: %w", story.ID, err))
 			return
 		}
-		if err := a.changeStoryStatus(context.Background(), story.ID, StatusDone, false, "Marked done after PR merged"); err != nil {
-			_ = a.updateQueueRunItemStatus(context.Background(), queueRunID, story.ID, "failed")
+		completed, previousSummary, err = a.applyStoryPipelineOutcome(context.Background(), queueRunID, story, result, completed, total, previousSummary)
+		if err != nil {
+			_ = a.updateQueueRunItemStatus(context.Background(), queueRunID, story.ID, QueueItemFailed)
 			a.skipPendingQueueRunItems(context.Background(), queueRunID)
-			_ = a.addEvent(ctx, story.ID, "agent_needs_review", "PR merged, but the app could not mark the story done")
-			a.finishAgentRun(context.Background(), queueRunID, "needs_review", "Queue run needs review", completed, fmt.Errorf("%s was not marked done: %w", story.ID, err))
+			_ = a.addEvent(ctx, story.ID, "agent_needs_review", "Pipeline finished, but the app could not finalize the story status")
+			a.finishAgentRun(context.Background(), queueRunID, "needs_review", "Queue run needs review", completed, fmt.Errorf("%s was not finalized: %w", story.ID, err))
 			return
 		}
 		a.publishAgentEvent("board")
-		completed++
-		_ = a.updateQueueRunItemStatus(context.Background(), queueRunID, story.ID, "completed")
-		previousSummary = summarizeFinalMessage(story, finalMessage)
-		_ = a.addEvent(ctx, story.ID, "agent_completed", "Story pipeline completed and PR merged")
-		a.updateAgentProgress("", fmt.Sprintf("Completed %s", story.ID), completed, total)
-		_ = a.updateQueueRun(context.Background(), queueRunID, "running", fmt.Sprintf("Completed %s", story.ID), completed, nil)
-		a.publishAgentEvent("board")
 	}
 	a.finishAgentRun(context.Background(), queueRunID, "completed", fmt.Sprintf("Queue run complete: %d/%d stories", completed, total), completed, nil)
+}
+
+// applyStoryPipelineOutcome records the post-pipeline story outcome and advances the queue item.
+// Supervised pauses leave the story in_review and mark the queue item awaiting_human so later stories can run.
+func (a *App) applyStoryPipelineOutcome(ctx context.Context, queueRunID int64, story Story, result pipelineResult, completed, total int, previousSummary string) (int, string, error) {
+	if result.AwaitingHuman {
+		completed++
+		if err := a.updateQueueRunItemStatus(ctx, queueRunID, story.ID, QueueItemAwaitingHuman); err != nil {
+			return completed, previousSummary, err
+		}
+		previousSummary = summarizeFinalMessage(story, result.FinalMessage)
+		a.updateAgentProgress("", fmt.Sprintf("Waiting on human for %s", story.ID), completed, total)
+		_ = a.updateQueueRun(ctx, queueRunID, "running", fmt.Sprintf("Waiting on human for %s", story.ID), completed, nil)
+		return completed, previousSummary, nil
+	}
+
+	if err := a.changeStoryStatus(ctx, story.ID, StatusDone, false, "Marked done after PR merged"); err != nil {
+		return completed, previousSummary, err
+	}
+	completed++
+	if err := a.updateQueueRunItemStatus(ctx, queueRunID, story.ID, QueueItemCompleted); err != nil {
+		return completed, previousSummary, err
+	}
+	previousSummary = summarizeFinalMessage(story, result.FinalMessage)
+	_ = a.addEvent(ctx, story.ID, "agent_completed", "Story pipeline completed and PR merged")
+	a.updateAgentProgress("", fmt.Sprintf("Completed %s", story.ID), completed, total)
+	_ = a.updateQueueRun(ctx, queueRunID, "running", fmt.Sprintf("Completed %s", story.ID), completed, nil)
+	return completed, previousSummary, nil
 }
 
 func (a *App) runCodexForStoryWithKind(ctx context.Context, queueRunID int64, baseURL string, project Project, story Story, prompt, runKind, branch string, prNumber int, prURL string) (string, error) {
@@ -2147,7 +2833,7 @@ func (a *App) runCodexForStoryWithKind(ctx context.Context, queueRunID int64, ba
 		return "", err
 	}
 	finalPath := filepath.Join(runDir, story.ID+"-"+runKind+"-final.md")
-	codexBin, err := resolveCodexBinary()
+	runner, err := a.newImplementerRunner(context.Background())
 	if err != nil {
 		return "", err
 	}
@@ -2160,45 +2846,25 @@ func (a *App) runCodexForStoryWithKind(ctx context.Context, queueRunID int64, ba
 			_ = a.updateAgentStoryRunOutput(context.Background(), agentRunID, stdout, stderr)
 		},
 	}
-	args := []string{
-		"exec",
-		"--cd", project.WorkingDirectory,
-		"--sandbox", "workspace-write",
-		"-c", `approval_policy="never"`,
-		"--json",
-		"--output-last-message", finalPath,
+	role := AgentRunRoleImplement
+	if runKind == RunKindCodexFix || runKind == RunKindCodexAddressFeedback || runKind == RunKindCodexResolveConflicts {
+		role = AgentRunRoleFix
 	}
-	if !isGitWorkTree(project.WorkingDirectory) {
-		args = append(args, "--skip-git-repo-check")
-	}
-	args = append(args, prompt)
-	cmd := osexec.CommandContext(ctx, codexBin, args...)
-	cmd.Stdout = output.stdoutWriter()
-	cmd.Stderr = output.stderrWriter()
-	cmd.Env = append(os.Environ(),
-		"RIPPLE_BASE_URL="+baseURL,
-		"RIPPLE_STORY_ID="+story.ID,
-		"TASKMANAGER_BASE_URL="+baseURL,
-		"TASKMANAGER_STORY_ID="+story.ID,
-	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	err = cmd.Start()
-	if err == nil {
-		done := make(chan error, 1)
-		go func() {
-			done <- cmd.Wait()
-		}()
-		select {
-		case err = <-done:
-		case <-ctx.Done():
-			if cmd.Process != nil {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
-			err = <-done
-		}
-	}
+	result, err := runner.Run(ctx, AgentRunRequest{
+		Role:             role,
+		Prompt:           prompt,
+		WorkingDir:       project.WorkingDirectory,
+		BaseURL:          baseURL,
+		StoryID:          story.ID,
+		FinalMessagePath: finalPath,
+		Stdout:           output.stdoutWriter(),
+		Stderr:           output.stderrWriter(),
+	})
 	output.flushNow()
-	stdoutText, stderrText := output.snapshot()
+	stdoutText, stderrText := result.Stdout, result.Stderr
+	if stdoutText == "" && stderrText == "" {
+		stdoutText, stderrText = output.snapshot()
+	}
 	if err != nil {
 		detail := stderrText
 		if detail == "" {
@@ -2215,13 +2881,10 @@ func (a *App) runCodexForStoryWithKind(ctx context.Context, queueRunID int64, ba
 		}
 		return "", err
 	}
-	final, err := os.ReadFile(finalPath)
-	if err != nil {
-		finalMessage := stdoutText
-		_ = a.finishAgentStoryRun(context.Background(), agentRunID, "completed", stdoutText, stderrText, finalMessage, nil)
-		return finalMessage, nil
+	finalMessage := strings.TrimSpace(result.FinalMessage)
+	if finalMessage == "" {
+		finalMessage = strings.TrimSpace(stdoutText)
 	}
-	finalMessage := strings.TrimSpace(string(final))
 	_ = a.finishAgentStoryRun(context.Background(), agentRunID, "completed", stdoutText, stderrText, finalMessage, nil)
 	return finalMessage, nil
 }
@@ -2257,17 +2920,164 @@ func (a *App) finishAgentRun(ctx context.Context, queueRunID int64, status, mess
 	a.publishAgentEvent("board")
 }
 
+// finishManualAgentWork clears the global agent slot after a non-queue action (e.g. address-feedback).
+func (a *App) finishManualAgentWork(queueRunID int64, message string, err error) {
+	a.agentMu.Lock()
+	a.agentStatus.Running = false
+	a.agentStatus.QueueRunID = queueRunID
+	a.agentStatus.CurrentStoryID = ""
+	a.agentStatus.Message = message
+	a.agentStatus.FinishedAt = time.Now().UTC()
+	if err != nil && !errors.Is(err, context.Canceled) {
+		a.agentStatus.LastError = truncate(err.Error(), 180)
+	} else {
+		a.agentStatus.LastError = ""
+	}
+	a.agentCancel = nil
+	a.agentMu.Unlock()
+	a.publishAgentEvent("activity")
+	a.publishAgentEvent("board")
+}
+
+func (a *App) startAddressFeedback(storyID, baseURL string) error {
+	story, project, pipeline, feedback, err := a.prepareAddressFeedback(context.Background(), storyID)
+	if err != nil {
+		return err
+	}
+	if _, err := a.resolveImplementer(context.Background()); err != nil {
+		return err
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	a.agentMu.Lock()
+	if a.agentStatus.Running {
+		a.agentMu.Unlock()
+		cancel()
+		return badRequest("An agent is already running. Wait for it to finish or stop it first.")
+	}
+	a.agentStatus = AgentStatus{
+		Running:        true,
+		QueueRunID:     pipeline.QueueRunID,
+		CurrentStoryID: story.ID,
+		Message:        "Addressing review comments",
+		StartedAt:      time.Now().UTC(),
+		Total:          1,
+	}
+	a.agentCancel = cancel
+	a.agentMu.Unlock()
+	a.publishAgentEvent("activity")
+	a.publishAgentEvent("board")
+
+	go func() {
+		runErr := a.runAddressFeedback(runCtx, baseURL, story, project, pipeline, feedback)
+		message := fmt.Sprintf("Finished addressing feedback for %s", story.ID)
+		if runErr != nil {
+			if errors.Is(runErr, context.Canceled) {
+				message = "Address feedback stopped"
+			} else {
+				message = "Address feedback failed"
+			}
+		}
+		a.finishManualAgentWork(pipeline.QueueRunID, message, runErr)
+	}()
+	return nil
+}
+
+func (a *App) startResolveConflicts(storyID, baseURL string) error {
+	story, project, pipeline, defaultBranch, err := a.prepareResolveConflicts(context.Background(), storyID)
+	if err != nil {
+		return err
+	}
+	if _, err := a.resolveImplementer(context.Background()); err != nil {
+		return err
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	a.agentMu.Lock()
+	if a.agentStatus.Running {
+		a.agentMu.Unlock()
+		cancel()
+		return badRequest("An agent is already running. Wait for it to finish or stop it first.")
+	}
+	a.agentStatus = AgentStatus{
+		Running:        true,
+		QueueRunID:     pipeline.QueueRunID,
+		CurrentStoryID: story.ID,
+		Message:        "Resolving merge conflicts",
+		StartedAt:      time.Now().UTC(),
+		Total:          1,
+	}
+	a.agentCancel = cancel
+	a.agentMu.Unlock()
+	a.publishAgentEvent("activity")
+	a.publishAgentEvent("board")
+
+	go func() {
+		runErr := a.runResolveConflicts(runCtx, baseURL, story, project, pipeline, defaultBranch)
+		message := fmt.Sprintf("Finished conflict resolution for %s", story.ID)
+		if runErr != nil {
+			if errors.Is(runErr, context.Canceled) {
+				message = "Conflict resolution stopped"
+			} else {
+				message = "Conflict resolution failed"
+			}
+		}
+		a.finishManualAgentWork(pipeline.QueueRunID, message, runErr)
+	}()
+	return nil
+}
+
+// startHumanMerge merges a supervised story's PR under the global agent lock (sync so gate failures surface to the UI).
+func (a *App) startHumanMerge(storyID string) error {
+	story, project, pipeline, err := a.prepareHumanMerge(context.Background(), storyID)
+	if err != nil {
+		return err
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.agentMu.Lock()
+	if a.agentStatus.Running {
+		a.agentMu.Unlock()
+		return badRequest("An agent is already running. Wait for it to finish or stop it first.")
+	}
+	a.agentStatus = AgentStatus{
+		Running:        true,
+		QueueRunID:     pipeline.QueueRunID,
+		CurrentStoryID: story.ID,
+		Message:        "Merging pull request",
+		StartedAt:      time.Now().UTC(),
+		Total:          1,
+	}
+	a.agentCancel = cancel
+	a.agentMu.Unlock()
+	a.publishAgentEvent("activity")
+	a.publishAgentEvent("board")
+
+	runErr := a.executeHumanMerge(runCtx, story, project, pipeline)
+	message := fmt.Sprintf("Merged %s", story.ID)
+	if runErr != nil {
+		if errors.Is(runErr, context.Canceled) {
+			message = "Merge stopped"
+		} else {
+			message = "Merge failed"
+		}
+	}
+	a.finishManualAgentWork(pipeline.QueueRunID, message, runErr)
+	return runErr
+}
+
 func (a *App) stopAgentQueue() error {
 	a.agentMu.Lock()
 	cancel := a.agentCancel
 	running := a.agentStatus.Running
 	if running {
-		a.agentStatus.Message = "Stopping queued run"
+		a.agentStatus.Message = "Stopping agent"
 	}
 	a.agentMu.Unlock()
 	a.publishAgentEvent("activity")
 	if !running || cancel == nil {
-		return badRequest("agent queue is not running")
+		return badRequest("agent is not running")
 	}
 	cancel()
 	return nil
@@ -2366,7 +3176,7 @@ func (a *App) boardData(ctx context.Context, projectID, epicID string, showClose
 	if err != nil {
 		return BoardData{}, err
 	}
-	columns := []string{StatusQueued, StatusBacklog, StatusInProgress, StatusDone}
+	columns := []string{StatusQueued, StatusBacklog, StatusInProgress, StatusInReview, StatusDone}
 	if showClosed {
 		columns = append(columns, StatusClosed)
 	}
@@ -2392,19 +3202,15 @@ func (a *App) boardData(ctx context.Context, projectID, epicID string, showClose
 	}
 	data.Dashboard = dashboard
 	if storyID != "" {
-		story, err := a.getStory(ctx, storyID)
+		panel, err := a.storyPanelData(ctx, storyID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return data, nil
 			}
 			return BoardData{}, err
 		}
-		events, err := a.listEvents(ctx, story.ID)
-		if err != nil {
-			return BoardData{}, err
-		}
 		data.HasDetailStory = true
-		data.Detail = StoryPanelData{Story: story, Events: events}
+		data.Detail = panel
 	}
 	return data, nil
 }
@@ -2481,6 +3287,7 @@ func (a *App) dashboardData(ctx context.Context, projects []Project, projectID, 
 		data.Counts.Backlog += counts.Backlog
 		data.Counts.Queued += counts.Queued
 		data.Counts.InProgress += counts.InProgress
+		data.Counts.InReview += counts.InReview
 		data.Counts.Done += counts.Done
 		data.Counts.Closed += counts.Closed
 		data.Counts.Total += counts.Total
@@ -2621,6 +3428,8 @@ func countStatuses(stories []Story) StatusCounts {
 			counts.Queued++
 		case StatusInProgress:
 			counts.InProgress++
+		case StatusInReview:
+			counts.InReview++
 		case StatusDone:
 			counts.Done++
 		case StatusClosed:
@@ -2630,8 +3439,12 @@ func countStatuses(stories []Story) StatusCounts {
 	return counts
 }
 
+const projectSelectColumns = `id, name, prefix, working_directory, autonomy_mode,
+	default_branch_override, pr_base_branch, quality_gate_mode, delete_branch_on_merge, branch_name_template,
+	next_story_number, created_at, updated_at`
+
 func (a *App) listProjects(ctx context.Context) ([]Project, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT id, name, prefix, working_directory, next_story_number, created_at, updated_at FROM projects ORDER BY name`)
+	rows, err := a.db.QueryContext(ctx, `SELECT `+projectSelectColumns+` FROM projects ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -2648,7 +3461,7 @@ func (a *App) listProjects(ctx context.Context) ([]Project, error) {
 }
 
 func (a *App) getProject(ctx context.Context, id string) (Project, error) {
-	row := a.db.QueryRowContext(ctx, `SELECT id, name, prefix, working_directory, next_story_number, created_at, updated_at FROM projects WHERE id = ?`, id)
+	row := a.db.QueryRowContext(ctx, `SELECT `+projectSelectColumns+` FROM projects WHERE id = ?`, id)
 	return scanProject(row)
 }
 
@@ -2768,9 +3581,18 @@ type rowScanner interface {
 func scanProject(row rowScanner) (Project, error) {
 	var p Project
 	var created, updated string
-	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.WorkingDirectory, &p.NextStoryNumber, &created, &updated); err != nil {
+	var deleteBranch int
+	if err := row.Scan(
+		&p.ID, &p.Name, &p.Prefix, &p.WorkingDirectory, &p.AutonomyMode,
+		&p.DefaultBranchOverride, &p.PRBaseBranch, &p.QualityGateMode, &deleteBranch, &p.BranchNameTemplate,
+		&p.NextStoryNumber, &created, &updated,
+	); err != nil {
 		return Project{}, err
 	}
+	p.AutonomyMode = normalizeAutonomyMode(p.AutonomyMode)
+	p.QualityGateMode = normalizeQualityGateMode(p.QualityGateMode)
+	p.BranchNameTemplate = normalizeBranchNameTemplate(p.BranchNameTemplate)
+	p.DeleteBranchOnMerge = deleteBranch != 0
 	p.CreatedAt = parseTime(created)
 	p.UpdatedAt = parseTime(updated)
 	return p, nil
@@ -2851,19 +3673,23 @@ func scanAgentRun(row rowScanner) (AgentRunSummary, error) {
 func runKindTitle(kind string) string {
 	switch kind {
 	case RunKindGrokReview:
-		return "Grok review"
+		return "Reviewer"
 	case RunKindCodexFix:
-		return "Codex fix"
+		return "Implementer fix"
+	case RunKindCodexAddressFeedback:
+		return "Address review comments"
+	case RunKindCodexResolveConflicts:
+		return "Resolve merge conflicts"
 	default:
-		return "Codex implement"
+		return "Implementer"
 	}
 }
 
 func runKindSource(kind string) string {
 	if kind == RunKindGrokReview {
-		return "grok"
+		return "reviewer"
 	}
-	return "codex"
+	return "implementer"
 }
 
 func agentLogItems(run AgentRunSummary) []AgentLogItem {
@@ -3079,10 +3905,78 @@ func statusTitle(status string) string {
 		return "Queued"
 	case StatusInProgress:
 		return "In Progress"
+	case StatusInReview:
+		return "In Review"
 	case StatusDone:
 		return "Done"
 	case StatusClosed:
 		return "Closed"
+	default:
+		return status
+	}
+}
+
+// eventTitle returns human-readable labels for story history event types.
+func eventTitle(eventType string) string {
+	switch eventType {
+	case eventAwaitingHumanReview:
+		return "Awaiting your review"
+	case eventAddressingFeedback:
+		return "Addressing feedback"
+	case eventResolvingConflicts:
+		return "Resolving conflicts"
+	case eventConflictsResolved:
+		return "Conflicts resolved"
+	case eventMergeConflictDetected:
+		return "Merge conflicts detected"
+	case eventFeedbackAddressed:
+		return "Feedback addressed"
+	case eventFeedbackNoChanges:
+		return "No code changes from feedback"
+	case eventMergedByHuman:
+		return "Merged by you"
+	case eventMergedExternally:
+		return "Synced external merge"
+	case eventQualityGateFailed:
+		return "Quality gate failed"
+	case eventQualityGateWarned:
+		return "Quality gate warned"
+	case "merge_failed":
+		return "Merge failed"
+	case "agent_completed":
+		return "Completed"
+	case "agent_failed":
+		return "Failed"
+	case "agent_needs_review":
+		return "Needs review"
+	case "status_changed":
+		return "Status changed"
+	case "story_closed":
+		return "Closed"
+	case "story_created":
+		return "Created"
+	default:
+		return strings.ReplaceAll(eventType, "_", " ")
+	}
+}
+
+// queueItemStatusTitle is the run-sidebar label for a queue item outcome.
+func queueItemStatusTitle(status string) string {
+	switch status {
+	case QueueItemAwaitingHuman:
+		return "waiting on you"
+	case QueueItemCompleted:
+		return "merged"
+	case QueueItemRunning:
+		return "running"
+	case QueueItemFailed:
+		return "failed"
+	case QueueItemStopped:
+		return "stopped"
+	case QueueItemSkipped:
+		return "skipped"
+	case "pending":
+		return "pending"
 	default:
 		return status
 	}
@@ -3109,6 +4003,35 @@ func slugify(s string) string {
 func normalizePrefix(s string) string {
 	re := regexp.MustCompile(`[^A-Za-z0-9]`)
 	return strings.ToUpper(re.ReplaceAllString(strings.TrimSpace(s), ""))
+}
+
+func normalizeAutonomyMode(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case AutonomySupervised:
+		return AutonomySupervised
+	default:
+		return AutonomyAutonomous
+	}
+}
+
+// resolveDefaultBranch returns project override or auto-detected default branch.
+func (p Project) resolveDefaultBranch(ctx context.Context, dir string) (string, error) {
+	if override := strings.TrimSpace(p.DefaultBranchOverride); override != "" {
+		return override, nil
+	}
+	return detectDefaultBranch(ctx, dir)
+}
+
+// resolvePRBaseBranch is the PR --base branch (override or resolved default).
+func (p Project) resolvePRBaseBranch(defaultBranch string) string {
+	if base := strings.TrimSpace(p.PRBaseBranch); base != "" {
+		return base
+	}
+	return defaultBranch
+}
+
+func (p Project) qualityGateIsWarn() bool {
+	return normalizeQualityGateMode(p.QualityGateMode) == QualityGateWarn
 }
 
 func normalizeWorkingDirectory(path string) (string, error) {
@@ -3147,36 +4070,6 @@ func expandUserPath(path string) (string, error) {
 		return filepath.Join(home, strings.TrimPrefix(path, "~/")), nil
 	}
 	return path, nil
-}
-
-func resolveCodexBinary() (string, error) {
-	candidates := []string{}
-	if configured := firstEnv("RIPPLE_CODEX_BIN", "TASKMANAGER_CODEX_BIN"); configured != "" {
-		candidates = append(candidates, configured)
-	}
-	candidates = append(candidates,
-		"codex",
-		"/opt/homebrew/bin/codex",
-		"/usr/local/bin/codex",
-		"/Applications/Codex.app/Contents/Resources/codex",
-	)
-	for _, candidate := range candidates {
-		if strings.ContainsRune(candidate, filepath.Separator) {
-			expanded, err := expandUserPath(candidate)
-			if err != nil {
-				return "", err
-			}
-			info, err := os.Stat(expanded)
-			if err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
-				return expanded, nil
-			}
-			continue
-		}
-		if path, err := osexec.LookPath(candidate); err == nil {
-			return path, nil
-		}
-	}
-	return "", badRequest("Codex CLI was not found. Set RIPPLE_CODEX_BIN to the codex executable path, for example /Applications/Codex.app/Contents/Resources/codex or /opt/homebrew/bin/codex.")
 }
 
 func isGitWorkTree(dir string) bool {
@@ -3270,13 +4163,42 @@ func defaultRippleDBPath() string {
 	if configured := firstEnv("RIPPLE_DB", "TASKMANAGER_DB"); configured != "" {
 		return configured
 	}
-	if _, err := os.Stat("ripple.db"); err == nil {
+	rippleOK := fileExists("ripple.db")
+	taskOK := fileExists("taskmanager.db")
+	switch {
+	case rippleOK && taskOK:
+		// Prefer the legacy taskmanager.db when ripple.db is an empty shell
+		// (common after a rename/default flip) so a restart doesn't look like data loss.
+		if sqliteProjectCount("ripple.db") == 0 && sqliteProjectCount("taskmanager.db") > 0 {
+			return "taskmanager.db"
+		}
+		return "ripple.db"
+	case rippleOK:
+		return "ripple.db"
+	case taskOK:
+		return "taskmanager.db"
+	default:
 		return "ripple.db"
 	}
-	if _, err := os.Stat("taskmanager.db"); err == nil {
-		return "taskmanager.db"
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+// sqliteProjectCount returns how many projects are in path, or 0 if unreadable/missing.
+func sqliteProjectCount(path string) int {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return 0
 	}
-	return "ripple.db"
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM projects`).Scan(&n); err != nil {
+		return 0
+	}
+	return n
 }
 
 func dbFilePath(path string) string {

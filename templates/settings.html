@@ -1,11 +1,18 @@
 {{define "settings.html"}}
 <main class="page-shell settings-page">
   <header class="page-heading settings-heading">
-    <div><span class="eyebrow">Application preferences</span><h1>Settings</h1><p>Configure how Ripple looks and behaves on this device.</p></div>
+    <div><span class="eyebrow">Application preferences</span><h1>Settings</h1><p>Configure how Ripple looks and which tools implement and review work on this device.</p></div>
   </header>
 
   <div class="settings-layout">
-    <nav class="settings-nav" aria-label="Settings sections"><a class="active" href="#appearance">Appearance</a><span>More settings will be added as the application grows.</span></nav>
+    <nav class="settings-nav" aria-label="Settings sections">
+      <a href="#appearance">Appearance</a>
+      <a href="#agents" {{if .SettingsAgents.Saved}}class="active"{{end}}>Agents</a>
+      <a href="#github-identity" {{if .GitHubIdentity.Saved}}class="active"{{end}}>GitHub identity</a>
+      <a href="#api-providers">API providers</a>
+      <span>Path precedence: env override &gt; settings path &gt; auto-detect</span>
+      <span>API keys and bot tokens are stored in the local SQLite database (not encrypted at rest).</span>
+    </nav>
     <div class="settings-content">
       <section id="appearance" class="lined-panel settings-section">
         <header><div><span class="eyebrow">Interface</span><h2>Appearance</h2><p>Choose a color mode. This preference is saved in this browser.</p></div><span class="current-setting" data-current-theme>System</span></header>
@@ -22,8 +29,211 @@
         </div>
       </section>
 
-      <section class="lined-panel settings-section future-settings">
-        <header><div><span class="eyebrow">Coming later</span><h2>More controls</h2><p>Settings for runner behavior, notifications, and application defaults can live here as those capabilities are introduced.</p></div></header>
+      <section id="agents" class="lined-panel settings-section">
+        <header>
+          <div>
+            <span class="eyebrow">Global tooling</span>
+            <h2>Agents</h2>
+            <p>Choose which tools fill the Implementer and Reviewer roles. These settings apply to every project.</p>
+          </div>
+          {{if eq .SettingsAgents.Flash "saved"}}<span class="current-setting settings-flash">Saved</span>{{end}}
+        </header>
+
+        <form class="agents-settings-form" method="post" action="/settings/agents">
+          <div class="agents-role-grid">
+            <label>
+              Implementer
+              <select name="implementerProviderId">
+                {{range .SettingsAgents.ImplementerOptions}}
+                  <option value="{{.ID}}" {{if eq $.SettingsAgents.ImplementerProviderID .ID}}selected{{end}}>{{.Name}}</option>
+                {{end}}
+              </select>
+              <small class="settings-help">CLI tools that can edit files (Codex or Grok). You may use the same tool for both roles. API providers cannot implement yet.</small>
+            </label>
+            <label>
+              Reviewer
+              <select name="reviewerProviderId">
+                {{range .SettingsAgents.ReviewerOptions}}
+                  <option value="{{.ID}}" {{if eq $.SettingsAgents.ReviewerProviderID .ID}}selected{{end}}>{{.Name}}{{if eq .Kind "api"}} (API){{end}}</option>
+                {{end}}
+              </select>
+              <small class="settings-help">Codex CLI, Grok CLI, or an OpenAI-compatible HTTP API. Reviews pull requests independently.</small>
+            </label>
+          </div>
+
+          <div class="agents-paths">
+            <h3>CLI path overrides</h3>
+            <p class="settings-help">Leave blank to auto-detect. Environment variables always win: <code>RIPPLE_CODEX_BIN</code>, <code>RIPPLE_GROK_BIN</code>.</p>
+            <label>
+              Codex binary path
+              <input name="codexBinaryPath" value="{{.SettingsAgents.CodexBinaryPath}}" placeholder="/Applications/Codex.app/Contents/Resources/codex or /opt/homebrew/bin/codex" autocomplete="off">
+            </label>
+            <label>
+              Grok binary path
+              <input name="grokBinaryPath" value="{{.SettingsAgents.GrokBinaryPath}}" placeholder="~/.grok/bin/grok or /opt/homebrew/bin/grok" autocomplete="off">
+            </label>
+          </div>
+
+          <div class="agents-form-actions">
+            <button type="submit">Save agent settings</button>
+          </div>
+        </form>
+
+        <div class="agents-probes">
+          <h3>Tool status</h3>
+          <p class="settings-help">Checked on this page load using the same resolution order as runs.</p>
+          <ul class="probe-list">
+            {{range .SettingsAgents.Probes}}
+            <li class="probe-item {{if .Found}}probe-ok{{else}}probe-missing{{end}}">
+              <span class="probe-mark" aria-hidden="true">{{if .Found}}✓{{else}}!{{end}}</span>
+              <div>
+                <strong>{{.Name}}</strong>
+                {{if .Found}}
+                  {{if .Path}}<span class="probe-path mono">{{.Path}}</span>{{end}}
+                  {{if .Version}}<span class="probe-version mono">{{.Version}}</span>{{end}}
+                  {{if .Detail}}<span class="probe-detail">{{.Detail}}</span>{{end}}
+                {{else}}
+                  <span class="probe-detail">{{.Detail}}</span>
+                {{end}}
+              </div>
+            </li>
+            {{end}}
+          </ul>
+        </div>
+      </section>
+
+      <section id="github-identity" class="lined-panel settings-section">
+        <header>
+          <div>
+            <span class="eyebrow">Attribution</span>
+            <h2>GitHub identity</h2>
+            <p>Control who GitHub shows for PRs, commits, and agent review comments. Hybrid is the default: you open PRs, Ripple authors commits (with you as co-author), comments stay as you until a bot token is set.</p>
+          </div>
+          {{if .GitHubIdentity.Saved}}<span class="current-setting settings-flash">Saved</span>{{end}}
+        </header>
+        {{if .GitHubIdentity.NeedsBotToken}}
+        <p class="inline-notice error">Bot token required: PR author or agent comments are set to Ripple bot, but no token is saved yet.</p>
+        {{end}}
+        <form class="agents-settings-form" method="post" action="/settings/github-identity">
+          <div class="agents-role-grid">
+            <label>
+              Pull request author
+              <select name="prAuthorMode">
+                <option value="me" {{if eq .GitHubIdentity.PRAuthorMode "me"}}selected{{end}}>Me (current gh login)</option>
+                <option value="bot" {{if eq .GitHubIdentity.PRAuthorMode "bot"}}selected{{end}}>Ripple bot (bot token)</option>
+              </select>
+              <small class="settings-help">Who opens PRs with <code>gh pr create</code>.</small>
+            </label>
+            <label>
+              Agent review comments
+              <select name="commentMode">
+                <option value="me" {{if eq .GitHubIdentity.CommentMode "me"}}selected{{end}}>Me (current gh login)</option>
+                <option value="bot" {{if eq .GitHubIdentity.CommentMode "bot"}}selected{{end}}>Ripple bot (bot token)</option>
+              </select>
+              <small class="settings-help">Who posts the automated agent review on the PR.</small>
+            </label>
+          </div>
+          <div class="agents-paths">
+            <h3>Commits</h3>
+            <label>
+              Commit attribution
+              <select name="commitMode">
+                <option value="me" {{if eq .GitHubIdentity.CommitMode "me"}}selected{{end}}>Me (repo git user.name / user.email)</option>
+                <option value="ripple" {{if eq .GitHubIdentity.CommitMode "ripple"}}selected{{end}}>Ripple only</option>
+                <option value="ripple_coauthor" {{if eq .GitHubIdentity.CommitMode "ripple_coauthor"}}selected{{end}}>Ripple + Co-authored-by me (recommended)</option>
+              </select>
+              <small class="settings-help">Sets <code>GIT_AUTHOR_*</code> on commits Ripple makes. Merge commits use the same rules.</small>
+            </label>
+            <div class="agents-role-grid">
+              <label>
+                Ripple commit name
+                <input name="commitName" value="{{.GitHubIdentity.CommitName}}" placeholder="Ripple" autocomplete="off">
+              </label>
+              <label>
+                Ripple commit email
+                <input name="commitEmail" value="{{.GitHubIdentity.CommitEmail}}" placeholder="ripple[bot]@users.noreply.github.com" autocomplete="off">
+              </label>
+              <label>
+                Co-author name (optional)
+                <input name="humanName" value="{{.GitHubIdentity.HumanName}}" placeholder="From git config user.name if blank" autocomplete="off">
+              </label>
+              <label>
+                Co-author email (optional)
+                <input name="humanEmail" value="{{.GitHubIdentity.HumanEmail}}" placeholder="From git config user.email if blank" autocomplete="off">
+              </label>
+            </div>
+          </div>
+          <div class="agents-paths">
+            <h3>Ripple bot credentials</h3>
+            <p class="settings-help">Required only when PR author or comments use “Ripple bot”. Use a fine-scoped PAT for a bot machine user (or App token). Leave blank to keep the saved token.</p>
+            <label>
+              Bot token
+              <input name="botToken" type="password" value="" placeholder="{{if .GitHubIdentity.HasBotToken}}{{.GitHubIdentity.MaskedToken}} — leave blank to keep{{else}}ghp_…{{end}}" autocomplete="off">
+            </label>
+            {{if .GitHubIdentity.HasBotToken}}
+            <label class="checkbox-label"><input type="checkbox" name="clearBotToken" value="1"> Clear saved bot token</label>
+            {{end}}
+          </div>
+          <div class="agents-form-actions">
+            <button type="submit">Save GitHub identity</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="api-providers" class="lined-panel settings-section">
+        <header>
+          <div>
+            <span class="eyebrow">HTTP integrations</span>
+            <h2>API providers</h2>
+            <p>OpenAI-compatible chat/completions endpoints for the <strong>Reviewer</strong> role only. Keys are stored locally and never written to run transcripts.</p>
+          </div>
+          {{if .SettingsAgents.TestResult}}
+            <span class="current-setting {{if .SettingsAgents.TestOK}}settings-flash{{else}}settings-flash-error{{end}}">{{.SettingsAgents.TestResult}}</span>
+          {{end}}
+        </header>
+
+        <div class="api-providers-body">
+          {{if .SettingsAgents.APIProviders}}
+          <div class="api-provider-list">
+            {{range .SettingsAgents.APIProviders}}
+            <article class="api-provider-card {{if .Selected}}selected{{end}}">
+              <form method="post" action="/settings/agents/api-providers/{{.ID}}" class="api-provider-form">
+                <div class="api-provider-heading">
+                  <strong>{{.Name}}</strong>
+                  {{if .Selected}}<span class="api-badge">Active reviewer</span>{{end}}
+                </div>
+                <label>Name<input name="name" value="{{.Name}}" required></label>
+                <label>Base URL<input name="baseUrl" value="{{.BaseURL}}" placeholder="https://api.openai.com/v1" required></label>
+                <label>Model<input name="model" value="{{.Model}}" placeholder="gpt-4o-mini" required></label>
+                <label>
+                  API key
+                  <input name="apiKey" type="password" value="" placeholder="{{if .HasAPIKey}}{{.MaskedKey}} — leave blank to keep{{else}}sk-…{{end}}" autocomplete="off">
+                </label>
+                <div class="api-provider-actions">
+                  <button type="submit">Update</button>
+                  <button type="submit" class="secondary-button" formaction="/settings/agents/api-providers/{{.ID}}/test" formmethod="post">Test connection</button>
+                  <button type="submit" class="secondary-button danger-text" formaction="/settings/agents/api-providers/{{.ID}}/delete" formmethod="post" onclick="return confirm('Delete this API provider?');">Delete</button>
+                </div>
+              </form>
+            </article>
+            {{end}}
+          </div>
+          {{else}}
+          <p class="settings-help api-empty">No API providers yet. Add one below to use as Reviewer.</p>
+          {{end}}
+
+          <form method="post" action="/settings/agents/api-providers" class="api-provider-form api-provider-create">
+            <h3>Add API provider</h3>
+            <p class="settings-help">Base URL should be the OpenAI-compatible root (Ripple appends <code>/chat/completions</code>).</p>
+            <label>Name<input name="name" placeholder="OpenAI" required></label>
+            <label>Base URL<input name="baseUrl" placeholder="https://api.openai.com/v1" required></label>
+            <label>Model<input name="model" placeholder="gpt-4o-mini" required></label>
+            <label>API key<input name="apiKey" type="password" placeholder="sk-…" required autocomplete="off"></label>
+            <div class="agents-form-actions">
+              <button type="submit">Add provider</button>
+            </div>
+          </form>
+        </div>
       </section>
     </div>
   </div>

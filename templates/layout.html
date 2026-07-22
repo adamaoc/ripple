@@ -86,14 +86,21 @@
 
     const modal = document.getElementById('story-modal');
     const folderModal = document.getElementById('folder-picker');
+    const createProjectModal = document.getElementById('create-project-modal');
     document.addEventListener('htmx:afterSwap', (event) => {
       if (event.detail.target?.id === 'story-modal-content' && modal && !modal.open) modal.showModal();
       if (event.detail.target?.id === 'folder-picker-content' && folderModal && !folderModal.open) folderModal.showModal();
     });
     document.querySelector('[data-modal-close]')?.addEventListener('click', () => modal?.close());
     document.querySelector('[data-folder-picker-close]')?.addEventListener('click', () => folderModal?.close());
+    document.querySelector('[data-create-project-open]')?.addEventListener('click', () => {
+      createProjectModal?.showModal();
+      createProjectModal?.querySelector('input[name="name"]')?.focus();
+    });
+    document.querySelector('[data-create-project-close]')?.addEventListener('click', () => createProjectModal?.close());
     modal?.addEventListener('click', (event) => { if (event.target === modal) modal.close(); });
     folderModal?.addEventListener('click', (event) => { if (event.target === folderModal) folderModal.close(); });
+    createProjectModal?.addEventListener('click', (event) => { if (event.target === createProjectModal) createProjectModal.close(); });
     document.addEventListener('click', (event) => {
       const popup = document.querySelector('[data-close-story-popup]');
       if (event.target.closest('[data-close-story-open]')) {
@@ -109,6 +116,76 @@
       if (!form) return;
       const input = form.querySelector('input[name="redirect"]');
       if (input) input.value = location.pathname + location.search;
+
+      if (!form.hasAttribute('data-busy-submit') || form.dataset.busy === '1') return;
+      const submitter = event.submitter || form.querySelector('button[type="submit"]:not([disabled])');
+      if (!submitter || submitter.disabled) return;
+      // Prevent double-submit; disable sibling cards without making them look like they started too.
+      const panel = form.closest('[data-supervised-panel]');
+      const activeHost = form.closest('[data-supervised-actions]') || form;
+      const hosts = panel
+        ? [...panel.querySelectorAll('[data-supervised-actions]')]
+        : [activeHost];
+      if (hosts.some((host) => host && host.dataset.busy === '1')) {
+        event.preventDefault();
+        return;
+      }
+      form.dataset.busy = '1';
+
+      const busyLabel = submitter.dataset.busyLabel || 'Working…';
+      hosts.forEach((host) => {
+        if (!host) return;
+        host.dataset.busy = '1';
+        host.querySelectorAll('button[type="submit"]').forEach((button) => {
+          button.disabled = true;
+          button.setAttribute('aria-busy', 'true');
+        });
+        const menuTriggers = host.querySelectorAll('.action-menu-trigger');
+        menuTriggers.forEach((trigger) => trigger.setAttribute('aria-disabled', 'true'));
+        if (host === activeHost) {
+          host.classList.add('is-busy');
+          host.classList.remove('is-waiting');
+          const status = host.querySelector('[data-supervised-busy-status]');
+          if (status) {
+            status.hidden = false;
+            status.textContent = busyLabel;
+          }
+          const wait = host.querySelector('[data-supervised-wait-status]');
+          if (wait) wait.hidden = true;
+        } else {
+          host.classList.add('is-waiting');
+          host.classList.remove('is-busy');
+          const status = host.querySelector('[data-supervised-busy-status]');
+          if (status) status.hidden = true;
+          const wait = host.querySelector('[data-supervised-wait-status]');
+          if (wait) wait.hidden = false;
+        }
+      });
+      submitter.classList.add('is-busy-submit');
+      submitter.dataset.originalLabel = submitter.textContent;
+      submitter.textContent = busyLabel;
+
+      if (panel) {
+        panel.classList.add('is-agent-running');
+        panel.querySelectorAll('form[data-busy-submit]').forEach((sibling) => {
+          sibling.dataset.busy = '1';
+        });
+        const heading = panel.querySelector('[data-awaiting-heading]');
+        if (heading) heading.textContent = heading.dataset.runningLabel || 'Running…';
+        const help = panel.querySelector('[data-awaiting-help]');
+        if (help) help.textContent = 'One story action is running. Other stories stay locked until it finishes.';
+      }
+      // Close any open ⋯ menus so the busy state is obvious.
+      document.querySelectorAll('details.action-menu[open]').forEach((menu) => {
+        menu.open = false;
+      });
+    });
+
+    // Close action menus when clicking outside.
+    document.addEventListener('click', (event) => {
+      document.querySelectorAll('details.action-menu[open]').forEach((menu) => {
+        if (!menu.contains(event.target)) menu.open = false;
+      });
     });
 
     const runRoot = document.querySelector('[data-run-root]');

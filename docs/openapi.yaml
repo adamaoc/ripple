@@ -49,6 +49,26 @@ paths:
                 workingDirectory:
                   type: string
                   description: Absolute path to the repo or folder where Codex should work.
+                autonomyMode:
+                  type: string
+                  enum: [autonomous, supervised]
+                  description: How far automation may go without a human. Defaults to autonomous. Invalid values normalize to autonomous.
+                defaultBranchOverride:
+                  type: string
+                  description: Optional default branch name when auto-detect is wrong. Empty means auto-detect.
+                prBaseBranch:
+                  type: string
+                  description: Optional PR base branch. Empty uses the resolved default branch.
+                qualityGateMode:
+                  type: string
+                  enum: [strict, warn]
+                  description: strict fails on quality gate errors; warn logs and continues. Defaults to strict.
+                deleteBranchOnMerge:
+                  type: boolean
+                  description: Delete the feature branch after merge. Defaults to true.
+                branchNameTemplate:
+                  type: string
+                  description: Feature branch template. Placeholders {id}, {slug}, {prefix}. Must include {id}. Defaults to ripple/{id}-{slug}.
       responses:
         "201":
           description: Created project
@@ -179,7 +199,7 @@ paths:
   /api/stories/{id}/status:
     patch:
       summary: Move a story through the bot-writable workflow
-      description: Bots may set backlog, in_progress, or done. Closed is manual-only and rejected here.
+      description: Bots may set backlog, in_progress, or done. queued, in_review, and closed are not bot-writable.
       parameters:
         - $ref: "#/components/parameters/StoryID"
       requestBody:
@@ -213,11 +233,11 @@ components:
       required: true
       schema:
         type: string
-      example: TXG-001
+      example: ACM-001
   schemas:
     StoryStatus:
       type: string
-      enum: [backlog, queued, in_progress, done, closed]
+      enum: [backlog, queued, in_progress, in_review, done, closed]
     BotWritableStatus:
       type: string
       enum: [backlog, in_progress, done]

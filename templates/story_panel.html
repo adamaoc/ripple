@@ -13,6 +13,7 @@
           <option value="backlog" {{if eq .Story.Status "backlog"}}selected{{end}}>Backlog</option>
           <option value="queued" {{if eq .Story.Status "queued"}}selected{{end}}>Queued</option>
           <option value="in_progress" {{if eq .Story.Status "in_progress"}}selected{{end}}>In progress</option>
+          <option value="in_review" {{if eq .Story.Status "in_review"}}selected{{end}}>In review</option>
           <option value="done" {{if eq .Story.Status "done"}}selected{{end}}>Done</option>
           {{if eq .Story.Status "closed"}}<option value="closed" selected disabled>Closed</option>{{end}}
         </select>
@@ -20,6 +21,58 @@
     </form>
   </div>
 </div>
+
+{{if eq .Story.Status "in_review"}}
+<section class="story-detail-section supervised-actions">
+  <div>
+    <h3>In review</h3>
+    <p>The agent opened a PR and posted a review. Act on feedback as needed, then merge when ready.</p>
+    {{if and .Pipeline .Pipeline.PRURL}}
+    <p class="pr-link-row"><a href="{{.Pipeline.PRURL}}" target="_blank" rel="noopener">Open pull request{{if .Pipeline.PRNumber}} #{{.Pipeline.PRNumber}}{{end}}</a>{{if .Pipeline.Branch}} <span class="mono muted">{{.Pipeline.Branch}}</span>{{end}}</p>
+    {{else}}
+    <p class="muted">No pull request is linked on the pipeline record for this story.</p>
+    {{end}}
+  </div>
+  <div class="supervised-action-forms{{if and .Pipeline .Pipeline.MergeConflict}} has-merge-conflict{{end}}" data-supervised-actions>
+    {{if and .Pipeline .Pipeline.MergeConflict}}
+    <p class="inline-notice warning merge-conflict-notice" role="status">
+      Merge conflicts with the base branch. Use Fix merge conflicts before merging.
+      {{if .Pipeline.Error}}<span class="muted">{{.Pipeline.Error}}</span>{{end}}
+    </p>
+    {{end}}
+    <p class="supervised-busy-status" data-supervised-busy-status hidden role="status" aria-live="polite"></p>
+    <p class="supervised-wait-status" data-supervised-wait-status hidden role="status">Waiting — another story action is in progress</p>
+    <div class="run-human-action-buttons">
+      <form method="post" action="/stories/{{.Story.ID}}/address-feedback" data-current-redirect data-busy-submit class="supervised-action-form">
+        <input type="hidden" name="redirect">
+        <button type="submit" class="primary-button" data-busy-label="Working on review comments…" {{if or (not .Pipeline) (not .Pipeline.PRURL)}}disabled{{end}}>Act on review comments</button>
+      </form>
+      <form method="post" action="/stories/{{.Story.ID}}/merge" data-current-redirect data-busy-submit class="supervised-action-form">
+        <input type="hidden" name="redirect">
+        <button type="submit" class="secondary-button" data-busy-label="Merging pull request…" {{if or (not .Pipeline) (not .Pipeline.PRNumber) (and .Pipeline .Pipeline.MergeConflict)}}disabled{{end}} {{if and .Pipeline .Pipeline.MergeConflict}}title="Resolve merge conflicts first"{{end}}>Merge pull request</button>
+      </form>
+      <details class="action-menu">
+        <summary class="secondary-button action-menu-trigger" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}aria-disabled="true"{{end}} aria-label="More actions">⋯</summary>
+        <div class="action-menu-panel" role="menu">
+          <form method="post" action="/stories/{{.Story.ID}}/resolve-conflicts" data-current-redirect data-busy-submit class="supervised-action-form">
+            <input type="hidden" name="redirect">
+            <button type="submit" role="menuitem" data-busy-label="Fixing merge conflicts…" {{if or (not .Pipeline) (not .Pipeline.Branch)}}disabled{{end}}>Fix merge conflicts</button>
+          </form>
+          <form method="post" action="/stories/{{.Story.ID}}/sync-pr" data-current-redirect data-busy-submit class="supervised-action-form">
+            <input type="hidden" name="redirect">
+            <button type="submit" role="menuitem" data-busy-label="Checking GitHub merge…" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}}>I already merged on GitHub</button>
+          </form>
+        </div>
+      </details>
+    </div>
+    <p class="muted settings-help">
+      <strong>Act on review comments</strong> — agent reads the latest PR feedback and pushes fixes (no quality gate).<br>
+      <strong>Merge pull request</strong> — runs checks, merges on GitHub, marks the story done.<br>
+      <strong>⋯ More</strong> — fix conflicts with main, or mark done if you already merged on GitHub.
+    </p>
+  </div>
+</section>
+{{end}}
 
 <section class="story-detail-section description">
   <h3>Description</h3>
@@ -34,7 +87,7 @@
   <h3>History</h3>
   {{range .Events}}
   <div class="event">
-    <strong>{{.Type}}</strong>
+    <strong>{{eventTitle .Type}}</strong>
     <span>{{.CreatedAt.Format "2006-01-02 15:04"}}</span>
     <p>{{.Message}}</p>
   </div>

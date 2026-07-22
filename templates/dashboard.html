@@ -21,21 +21,52 @@
   </section>
 
   <section class="lined-panel">
-    <div class="panel-heading"><div><span class="eyebrow">{{len .Dashboard.Projects}} total</span><h2>Projects</h2></div><span class="muted">Projects and epics are created through the API</span></div>
+    <div class="panel-heading">
+      <div><span class="eyebrow">{{len .Dashboard.Projects}} total</span><h2>Projects</h2></div>
+      <button type="button" class="primary-button" data-create-project-open>Create project</button>
+    </div>
     <div class="table-wrap">
       <table class="data-table project-table">
         <thead><tr><th>Project</th><th>Prefix</th><th>Backlog</th><th>Queued</th><th>Active</th><th>Done</th><th>Closed</th><th></th></tr></thead>
         <tbody>
           {{range .Dashboard.Projects}}
           <tr>
-            <td><a class="row-title" href="/projects/{{.Project.ID}}/backlog">{{.Project.Name}}</a><span class="row-subtitle">{{.EpicCount}} epics{{if .Project.WorkingDirectory}} · path ready{{else}} · path needed{{end}}</span></td>
+            <td><a class="row-title" href="/projects/{{.Project.ID}}/backlog">{{.Project.Name}}</a><span class="row-subtitle">{{.EpicCount}} epics{{if .Project.WorkingDirectory}} · path ready{{else}} · path needed{{end}}{{if eq .Project.AutonomyMode "supervised"}} · supervised{{else}} · autonomous{{end}}</span></td>
             <td class="mono">{{.Project.Prefix}}</td><td>{{.Counts.Backlog}}</td><td>{{.Counts.Queued}}</td><td>{{.Counts.InProgress}}</td><td>{{.Counts.Done}}</td><td>{{.Counts.Closed}}</td>
             <td class="row-actions"><a href="/projects/{{.Project.ID}}/backlog">Backlog</a><a href="/projects/{{.Project.ID}}/run">Run</a></td>
           </tr>
-          {{else}}<tr><td colspan="8" class="empty-state">No projects yet. Create the first project through the API.</td></tr>{{end}}
+          {{else}}<tr><td colspan="8" class="empty-state">No projects yet. Create one to get started.</td></tr>{{end}}
         </tbody>
       </table>
     </div>
   </section>
 </main>
+
+<dialog id="create-project-modal" class="create-project-modal">
+  <div class="modal-frame create-project-modal-frame">
+    <button type="button" class="modal-close icon-button" data-create-project-close aria-label="Close">×</button>
+    <div class="create-project-modal-heading">
+      <span class="eyebrow">Onboarding</span>
+      <h2>Create project</h2>
+    </div>
+    <form class="create-project-form" method="post" action="/projects">
+      <div class="create-project-pair">
+        <label>Name<input name="name" placeholder="Acme" required autocomplete="off"></label>
+        <div class="create-project-field">
+          <label>Prefix<input name="prefix" placeholder="ACM" maxlength="5" autocomplete="off"></label>
+          <p class="muted settings-help">Optional. Used for story IDs like ACM-001.</p>
+        </div>
+      </div>
+      <label>Working directory<input name="workingDirectory" placeholder="/path/to/repository (optional)" autocomplete="off"></label>
+      <label>Autonomy
+        <select name="autonomyMode">
+          <option value="autonomous" selected>Autonomous — implement, review, and merge without waiting</option>
+          <option value="supervised">Supervised — open PR and review, then wait for you</option>
+        </select>
+      </label>
+      <div class="project-path-actions"><button type="submit">Create project</button></div>
+      <p class="muted settings-help">After create, open Project settings to verify setup or clone from GitHub. Agents can still create projects via the API.</p>
+    </form>
+  </div>
+</dialog>
 {{end}}
