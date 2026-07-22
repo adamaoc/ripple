@@ -193,10 +193,12 @@ type AgentStatus struct {
 }
 
 type AgentPanelData struct {
-	Status              AgentStatus
-	QueuedCount         int
-	MissingPathProjects []Project
-	Activity            AgentActivityData
+	Status                 AgentStatus
+	QueuedCount            int
+	MissingPathProjects    []Project
+	Activity               AgentActivityData
+	ActionError            string
+	ActionErrorAgentsLink  bool
 }
 
 type FolderPickerData struct {
@@ -294,8 +296,10 @@ type RunPageData struct {
 	MissingPath bool
 	Legacy      bool
 	Summary     RunCompletionSummary
-	// ActionError is a user-facing message from a failed supervised action (query ?error=).
+	// ActionError is a user-facing message from a failed UI action (query ?error=).
 	ActionError string
+	// ActionErrorAgentsLink shows a Settings → Agents shortcut for tooling/config errors.
+	ActionErrorAgentsLink bool
 }
 
 type RunCompletionSummary struct {
@@ -317,6 +321,9 @@ type RunPullRequest struct {
 	Branch     string
 	// Outcome is "merged", "awaiting_human", or "open" for run completion UI.
 	Outcome string
+	// HasMergeConflict disables merge and surfaces a warning for awaiting-human PRs.
+	HasMergeConflict bool
+	ConflictDetail   string
 }
 
 type ProjectDashboard struct {
@@ -741,10 +748,11 @@ func (a *App) projectRunPageData(r *http.Request) (PageData, error) {
 	if err != nil {
 		return PageData{}, err
 	}
+	actionError := strings.TrimSpace(r.URL.Query().Get("error"))
 	runData := RunPageData{
 		Project: project, Run: selected, Runs: runs, LiveQueue: queued,
 		Agent: a.currentAgentStatus(), MissingPath: strings.TrimSpace(project.WorkingDirectory) == "",
-		ActionError: strings.TrimSpace(r.URL.Query().Get("error")),
+		ActionError: actionError, ActionErrorAgentsLink: actionErrorNeedsAgentsSettings(actionError),
 	}
 	if selected.ID != 0 {
 		runData.Items, err = a.listQueueRunItems(r.Context(), selected.ID)
@@ -771,8 +779,57 @@ func (a *App) projectRunPageData(r *http.Request) (PageData, error) {
 			}
 		}
 		runData.Summary = buildRunCompletionSummary(selected, runData.Activity.StoryRuns, runData.Items)
+		a.enrichAwaitingPRConflicts(r.Context(), selected.ID, &runData.Summary)
 	}
 	return PageData{Page: "run", Projects: projects, Project: project, Run: runData, CurrentAgent: a.currentAgentStatus()}, nil
+}
+
+func (a *App) enrichAwaitingPRConflicts(ctx context.Context, queueRunID int64, summary *RunCompletionSummary) {
+	if summary == nil || queueRunID == 0 {
+		return
+	}
+	items, err := a.listQueueRunItems(ctx, queueRunID)
+	if err != nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, pr := range summary.AwaitingHumanPRs {
+		seen[pr.StoryID] = true
+	}
+	for _, item := range items {
+		if item.Status != QueueItemAwaitingHuman {
+			continue
+		}
+		pipeline, err := a.getStoryPipeline(ctx, queueRunID, item.Story.ID)
+		if err != nil || pipeline.PRNumber <= 0 {
+			continue
+		}
+		if !seen[item.Story.ID] {
+			summary.AwaitingHumanPRs = append(summary.AwaitingHumanPRs, RunPullRequest{
+				StoryID: item.Story.ID, StoryTitle: item.Story.Title,
+				Number: pipeline.PRNumber, URL: pipeline.PRURL, Branch: pipeline.Branch,
+				Outcome: "awaiting_human",
+			})
+			seen[item.Story.ID] = true
+			if summary.AwaitingHumanCount == 0 {
+				// Count is derived separately from items; leave as-is.
+			}
+		}
+	}
+	for i := range summary.AwaitingHumanPRs {
+		pr := &summary.AwaitingHumanPRs[i]
+		pipeline, err := a.getStoryPipeline(ctx, queueRunID, pr.StoryID)
+		if err != nil {
+			continue
+		}
+		if pipeline.MergeConflict {
+			pr.HasMergeConflict = true
+			pr.ConflictDetail = strings.TrimSpace(pipeline.Error)
+			if pr.ConflictDetail == "" {
+				pr.ConflictDetail = "Pull request has merge conflicts with the base branch"
+			}
+		}
+	}
 }
 
 func buildRunCompletionSummary(run QueueRunSummary, storyRuns []AgentRunSummary, items []QueueRunItem) RunCompletionSummary {
@@ -988,6 +1045,9 @@ func (a *App) migrate(ctx context.Context) error {
 		if err := a.ensureColumn(ctx, "agent_runs", column, definition); err != nil {
 			return err
 		}
+	}
+	if err := a.ensureColumn(ctx, "story_pipelines", "merge_conflict", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
 	}
 	if err := a.ensureAgentSettings(ctx); err != nil {
 		return err
@@ -1497,10 +1557,71 @@ func (a *App) handleUIRunQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	baseURL := requestBaseURL(r)
 	if err := a.startAgentQueueRun(r.Context(), filters, baseURL); err != nil {
-		httpError(w, err)
+		a.finishUIStartRunError(w, r, err)
 		return
 	}
 	a.finishUIAction(w, r)
+}
+
+// finishUIStartRunError keeps the user in the UI when Start run fails (redirect banner,
+// HTMX agent controls, or settings shortcut) instead of dumping a raw JSON error page.
+func (a *App) finishUIStartRunError(w http.ResponseWriter, r *http.Request, err error) {
+	msg := err.Error()
+	var ce clientError
+	if errors.As(err, &ce) {
+		msg = ce.message
+	}
+	agentsLink := actionErrorNeedsAgentsSettings(msg)
+
+	redirect := strings.TrimSpace(r.FormValue("redirect"))
+	if strings.HasPrefix(redirect, "/") && !strings.HasPrefix(redirect, "//") {
+		a.finishUIActionError(w, r, err)
+		return
+	}
+
+	if r.Header.Get("HX-Request") != "" {
+		panel, panelErr := a.agentPanelDataForRequest(r)
+		if panelErr != nil {
+			httpError(w, err)
+			return
+		}
+		panel.ActionError = truncate(msg, 280)
+		panel.ActionErrorAgentsLink = agentsLink
+		w.Header().Set("HX-Retarget", "#agent-run-controls")
+		w.Header().Set("HX-Reswap", "outerHTML")
+		a.render(w, "agent_run_controls.html", panel)
+		return
+	}
+
+	if agentsLink {
+		http.Redirect(w, r, "/settings#agents", http.StatusSeeOther)
+		return
+	}
+	httpError(w, err)
+}
+
+func actionErrorNeedsAgentsSettings(msg string) bool {
+	lower := strings.ToLower(strings.TrimSpace(msg))
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, "settings") && strings.Contains(lower, "agent") {
+		return true
+	}
+	for _, needle := range []string{
+		"cli was not found",
+		"not available",
+		"not configured",
+		"no api key",
+		"missing base url",
+		"ripple_codex_bin",
+		"ripple_grok_bin",
+	} {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) handleUIStopAgent(w http.ResponseWriter, r *http.Request) {
@@ -3806,6 +3927,8 @@ func eventTitle(eventType string) string {
 		return "Resolving conflicts"
 	case eventConflictsResolved:
 		return "Conflicts resolved"
+	case eventMergeConflictDetected:
+		return "Merge conflicts detected"
 	case eventFeedbackAddressed:
 		return "Feedback addressed"
 	case eventFeedbackNoChanges:
@@ -4040,13 +4163,42 @@ func defaultRippleDBPath() string {
 	if configured := firstEnv("RIPPLE_DB", "TASKMANAGER_DB"); configured != "" {
 		return configured
 	}
-	if _, err := os.Stat("ripple.db"); err == nil {
+	rippleOK := fileExists("ripple.db")
+	taskOK := fileExists("taskmanager.db")
+	switch {
+	case rippleOK && taskOK:
+		// Prefer the legacy taskmanager.db when ripple.db is an empty shell
+		// (common after a rename/default flip) so a restart doesn't look like data loss.
+		if sqliteProjectCount("ripple.db") == 0 && sqliteProjectCount("taskmanager.db") > 0 {
+			return "taskmanager.db"
+		}
+		return "ripple.db"
+	case rippleOK:
+		return "ripple.db"
+	case taskOK:
+		return "taskmanager.db"
+	default:
 		return "ripple.db"
 	}
-	if _, err := os.Stat("taskmanager.db"); err == nil {
-		return "taskmanager.db"
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+// sqliteProjectCount returns how many projects are in path, or 0 if unreadable/missing.
+func sqliteProjectCount(path string) int {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return 0
 	}
-	return "ripple.db"
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM projects`).Scan(&n); err != nil {
+		return 0
+	}
+	return n
 }
 
 func dbFilePath(path string) string {

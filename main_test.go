@@ -930,17 +930,26 @@ func TestHumanMergeSuccessMarksDone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origGate, origMerge := humanMergeQualityGate, humanMergePR
+	origGate, origMerge, origConflicts := humanMergeQualityGate, humanMergePR, checkPRMergeConflicts
+	origDelay, origRetry := afterMergeConflictProbeDelay, mergeConflictRetryDelay
 	t.Cleanup(func() {
 		humanMergeQualityGate = origGate
 		humanMergePR = origMerge
+		checkPRMergeConflicts = origConflicts
+		afterMergeConflictProbeDelay = origDelay
+		mergeConflictRetryDelay = origRetry
 	})
+	afterMergeConflictProbeDelay = 0
+	mergeConflictRetryDelay = 0
 	humanMergeQualityGate = func(ctx context.Context, dir string) error { return nil }
 	humanMergePR = func(ctx context.Context, ghBin, dir string, prNumber int, deleteRemoteBranch bool) error {
 		if prNumber != 11 {
 			t.Fatalf("prNumber = %d", prNumber)
 		}
 		return nil
+	}
+	checkPRMergeConflicts = func(ctx context.Context, ghBin, dir string, prNumber int) (bool, string, error) {
+		return false, "", nil
 	}
 
 	project, err := app.getProject(context.Background(), "atlas")
@@ -985,6 +994,98 @@ func TestHumanMergeSuccessMarksDone(t *testing.T) {
 	}
 	if items[0].Status != QueueItemCompleted {
 		t.Fatalf("queue item status = %q, want completed", items[0].Status)
+	}
+}
+
+func TestRefreshAwaitingPRConflictsMarksSibling(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 2)
+	first, second := stories[0], stories[1]
+	for _, story := range stories {
+		if err := app.changeStoryStatus(context.Background(), story.ID, StatusQueued, false, "queue"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	queued, _ := app.listStories(context.Background(), storyFilters{ProjectID: "atlas", Status: StatusQueued, ShowClosed: true})
+	runID, err := app.createQueueRun(context.Background(), storyFilters{ProjectID: "atlas"}, queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, story := range []Story{first, second} {
+		_ = app.upsertStoryPipeline(context.Background(), StoryPipeline{
+			QueueRunID: runID, StoryID: story.ID, Phase: PipelinePhaseAwaitingHuman,
+			Branch: fmt.Sprintf("b-%d", i+1), DefaultBranch: "main",
+			PRNumber: 20 + i, PRURL: fmt.Sprintf("https://example.com/pull/%d", 20+i),
+		})
+		_ = app.changeStoryStatus(context.Background(), story.ID, StatusInReview, false, "await")
+		_ = app.updateQueueRunItemStatus(context.Background(), runID, story.ID, QueueItemAwaitingHuman)
+	}
+
+	origConflicts := checkPRMergeConflicts
+	origDelay, origRetry := afterMergeConflictProbeDelay, mergeConflictRetryDelay
+	t.Cleanup(func() {
+		checkPRMergeConflicts = origConflicts
+		afterMergeConflictProbeDelay = origDelay
+		mergeConflictRetryDelay = origRetry
+	})
+	afterMergeConflictProbeDelay = 0
+	mergeConflictRetryDelay = 0
+	checkPRMergeConflicts = func(ctx context.Context, ghBin, dir string, prNumber int) (bool, string, error) {
+		if prNumber == 21 {
+			return true, "Pull request has merge conflicts with the base branch", nil
+		}
+		return false, "", nil
+	}
+
+	// Completing the first story should probe siblings and flag conflicts on the second.
+	if err := app.finalizeMergedStory(context.Background(), first, StoryPipeline{
+		QueueRunID: runID, StoryID: first.ID, Phase: PipelinePhaseMerge, PRNumber: 20, PRURL: "https://example.com/pull/20",
+	}, eventMergedByHuman, "Merged by human", "merged"); err != nil {
+		t.Fatal(err)
+	}
+
+	secondPipe, err := app.getLatestStoryPipeline(context.Background(), second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !secondPipe.MergeConflict {
+		t.Fatal("expected second story pipeline to be marked merge_conflict")
+	}
+
+	_, _, _, err = app.prepareHumanMerge(context.Background(), second.ID)
+	if err == nil || !strings.Contains(err.Error(), "merge conflicts") {
+		t.Fatalf("prepareHumanMerge should block conflicted PR, got %v", err)
+	}
+
+	summary := buildRunCompletionSummary(QueueRunSummary{ID: runID}, []AgentRunSummary{
+		{StoryID: first.ID, StoryTitle: first.Title, PRNumber: 20, PRURL: "https://example.com/pull/20"},
+		{StoryID: second.ID, StoryTitle: second.Title, PRNumber: 21, PRURL: "https://example.com/pull/21", Branch: "b-2"},
+	}, []QueueRunItem{
+		{Story: first, Status: QueueItemCompleted},
+		{Story: second, Status: QueueItemAwaitingHuman},
+	})
+	app.enrichAwaitingPRConflicts(context.Background(), runID, &summary)
+	if len(summary.AwaitingHumanPRs) != 1 || !summary.AwaitingHumanPRs[0].HasMergeConflict {
+		t.Fatalf("AwaitingHumanPRs = %#v", summary.AwaitingHumanPRs)
+	}
+
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/projects/atlas/runs/%d", runID), nil))
+	body := res.Body.String()
+	if !strings.Contains(body, "Merge conflicts with the base branch") {
+		t.Fatal("run page should warn about merge conflicts")
+	}
+	if !strings.Contains(body, `title="Resolve merge conflicts first"`) && !strings.Contains(body, "disabled") {
+		t.Fatal("merge button should be disabled for conflicted PR")
+	}
+}
+
+func TestLooksLikeMergeConflictError(t *testing.T) {
+	if !looksLikeMergeConflictError("merge PR failed: GraphQL: Pull Request has merge conflicts (mergePullRequest)") {
+		t.Fatal("expected conflict detection")
+	}
+	if looksLikeMergeConflictError("permission denied") {
+		t.Fatal("should not treat unrelated errors as conflicts")
 	}
 }
 
@@ -1308,6 +1409,9 @@ func TestEventAndQueueItemTitles(t *testing.T) {
 	if got := eventTitle(eventConflictsResolved); got != "Conflicts resolved" {
 		t.Fatalf("eventTitle resolved = %q", got)
 	}
+	if got := eventTitle(eventMergeConflictDetected); got != "Merge conflicts detected" {
+		t.Fatalf("eventTitle merge conflict = %q", got)
+	}
 	if got := eventTitle(eventMergedByHuman); got != "Merged by you" {
 		t.Fatalf("eventTitle merged by human = %q", got)
 	}
@@ -1630,5 +1734,142 @@ func TestRunPageShowsAwaitingHumanSummary(t *testing.T) {
 	}
 	if strings.Contains(body, "Work finished successfully") {
 		t.Fatal("run page must not say work finished successfully when stories await human")
+	}
+}
+
+func TestDefaultRippleDBPathPrefersPopulatedLegacyDB(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	// Empty/new ripple.db shell.
+	ripple, err := sql.Open("sqlite", "ripple.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ripple.Exec(`CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = ripple.Close()
+
+	// Legacy DB with real data.
+	legacy, err := sql.Open("sqlite", "taskmanager.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`INSERT INTO projects (id, name) VALUES ('atlas', 'Atlas')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = legacy.Close()
+
+	t.Setenv("RIPPLE_DB", "")
+	t.Setenv("TASKMANAGER_DB", "")
+	if got := defaultRippleDBPath(); got != "taskmanager.db" {
+		t.Fatalf("defaultRippleDBPath() = %q, want taskmanager.db", got)
+	}
+}
+
+func TestActionErrorNeedsAgentsSettings(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want bool
+	}{
+		{"Reviewer not available: Codex CLI was not found. Set a path in Settings → Agents.", true},
+		{"Implementer not available: Grok CLI was not found.", true},
+		{"Reviewer is not configured. Open Settings → Agents and choose a provider.", true},
+		{"agent queue is already running", false},
+		{"there are no queued stories to run", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := actionErrorNeedsAgentsSettings(tc.msg); got != tc.want {
+			t.Fatalf("actionErrorNeedsAgentsSettings(%q) = %v, want %v", tc.msg, got, tc.want)
+		}
+	}
+}
+
+func TestStartRunFailureRedirectsWithErrorInsteadOfJSON(t *testing.T) {
+	app := testApp(t)
+	seedProjectStories(t, app, "atlas", 1) // backlog only — nothing queued
+
+	form := url.Values{
+		"projectId": {"atlas"},
+		"redirect":  {"/projects/atlas/run?new=1"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/agent/run-queue", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, req)
+
+	if res.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d; body = %s", res.Code, res.Body.String())
+	}
+	if ct := res.Header().Get("Content-Type"); strings.Contains(ct, "json") {
+		t.Fatalf("should not return JSON, content-type = %q body = %s", ct, res.Body.String())
+	}
+	loc := res.Header().Get("Location")
+	decoded, _ := url.QueryUnescape(loc)
+	if !strings.Contains(loc, "/projects/atlas/run") || !strings.Contains(decoded, "no queued stories") {
+		t.Fatalf("location = %q", loc)
+	}
+}
+
+func TestRunPageShowsAgentsSettingsLinkForToolingError(t *testing.T) {
+	app := testApp(t)
+	seedProjectStories(t, app, "atlas", 1)
+
+	msg := "Reviewer not available: Codex CLI was not found. Set a path in Settings → Agents, or set RIPPLE_CODEX_BIN."
+	path := "/projects/atlas/run?new=1&error=" + url.QueryEscape(msg)
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, path, nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, "Codex CLI was not found") {
+		t.Fatal("run page should show the tooling error")
+	}
+	if !strings.Contains(body, `href="/settings#agents"`) {
+		t.Fatal("run page should link to Settings → Agents")
+	}
+}
+
+func TestStartRunHTMXFailureRendersAgentControlsWithSettingsLink(t *testing.T) {
+	app := testApp(t)
+	stories := seedProjectStories(t, app, "atlas", 1)
+	if err := app.changeStoryStatus(context.Background(), stories[0].ID, StatusQueued, false, "queue"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.ExecContext(context.Background(), `UPDATE app_config SET reviewer_provider_id = 'missing_provider' WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"projectId": {"atlas"}}
+	req := httptest.NewRequest(http.MethodPost, "/agent/run-queue", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("HX-Request", "true")
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d; body = %s", res.Code, res.Body.String())
+	}
+	if res.Header().Get("HX-Retarget") != "#agent-run-controls" {
+		t.Fatalf("HX-Retarget = %q", res.Header().Get("HX-Retarget"))
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, "id=\"agent-run-controls\"") {
+		t.Fatal("expected agent controls HTML")
+	}
+	if !strings.Contains(body, "not available") && !strings.Contains(body, "not configured") && !strings.Contains(body, "CLI was not found") {
+		t.Fatalf("expected agent tooling error, got %s", body)
+	}
+	if !strings.Contains(body, `href="/settings#agents"`) {
+		t.Fatal("HTMX error controls should link to Settings → Agents")
+	}
+	if strings.Contains(body, `"error"`) && strings.HasPrefix(strings.TrimSpace(body), "{") {
+		t.Fatal("should not return raw JSON error")
 	}
 }

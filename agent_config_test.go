@@ -182,6 +182,57 @@ func TestSaveAgentSettingsRejectsMissingBinaryPath(t *testing.T) {
 	}
 }
 
+func TestCLIRoleSuffix(t *testing.T) {
+	if got := cliRoleSuffix(ProviderIDCodexCLI, ProviderIDCodexCLI, ProviderIDGrokCLI); got != " (implementer)" {
+		t.Fatalf("codex implementer only = %q", got)
+	}
+	if got := cliRoleSuffix(ProviderIDCodexCLI, ProviderIDGrokCLI, ProviderIDCodexCLI); got != " (reviewer)" {
+		t.Fatalf("codex reviewer only = %q", got)
+	}
+	if got := cliRoleSuffix(ProviderIDGrokCLI, ProviderIDGrokCLI, ProviderIDGrokCLI); got != " (implementer + reviewer)" {
+		t.Fatalf("grok both roles = %q", got)
+	}
+	if got := cliRoleSuffix(ProviderIDCodexCLI, ProviderIDGrokCLI, ProviderIDGrokCLI); got != "" {
+		t.Fatalf("unused tool = %q, want empty", got)
+	}
+}
+
+func TestSettingsProbesReflectSwappedRoles(t *testing.T) {
+	app := testApp(t)
+	dir := t.TempDir()
+	codexBin := filepath.Join(dir, "fake-codex")
+	grokBin := filepath.Join(dir, "fake-grok")
+	writeExecutable(t, codexBin, "#!/bin/sh\necho codex-cli 9.9.9\n")
+	writeExecutable(t, grokBin, "#!/bin/sh\necho 9.9.9\n")
+	t.Setenv("RIPPLE_CODEX_BIN", codexBin)
+	t.Setenv("RIPPLE_GROK_BIN", grokBin)
+	t.Setenv("TASKMANAGER_CODEX_BIN", "")
+	t.Setenv("TASKMANAGER_GROK_BIN", "")
+
+	if err := app.saveAgentSettingsFromForm(context.Background(), ProviderIDGrokCLI, ProviderIDCodexCLI, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	res := httptest.NewRecorder()
+	app.routes().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/settings", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	body := res.Body.String()
+	if strings.Contains(body, "Codex (implementer)") || strings.Contains(body, "Codex CLI (implementer)") {
+		t.Fatal("Codex must not be labeled implementer when Grok is implementer")
+	}
+	if !strings.Contains(body, "Codex CLI (reviewer)") {
+		t.Fatal("expected Codex CLI (reviewer) probe label")
+	}
+	if !strings.Contains(body, "Grok CLI (implementer)") {
+		t.Fatal("expected Grok CLI (implementer) probe label")
+	}
+	if !strings.Contains(body, "Active implementer (CLI)") || !strings.Contains(body, "Grok CLI") {
+		t.Fatal("expected active implementer probe for Grok")
+	}
+}
+
 func writeExecutable(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {

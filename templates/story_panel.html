@@ -33,8 +33,15 @@
     <p class="muted">No pull request is linked on the pipeline record for this story.</p>
     {{end}}
   </div>
-  <div class="supervised-action-forms" data-supervised-actions>
+  <div class="supervised-action-forms{{if and .Pipeline .Pipeline.MergeConflict}} has-merge-conflict{{end}}" data-supervised-actions>
+    {{if and .Pipeline .Pipeline.MergeConflict}}
+    <p class="inline-notice warning merge-conflict-notice" role="status">
+      Merge conflicts with the base branch. Use Fix merge conflicts before merging.
+      {{if .Pipeline.Error}}<span class="muted">{{.Pipeline.Error}}</span>{{end}}
+    </p>
+    {{end}}
     <p class="supervised-busy-status" data-supervised-busy-status hidden role="status" aria-live="polite"></p>
+    <p class="supervised-wait-status" data-supervised-wait-status hidden role="status">Waiting — another story action is in progress</p>
     <div class="run-human-action-buttons">
       <form method="post" action="/stories/{{.Story.ID}}/address-feedback" data-current-redirect data-busy-submit class="supervised-action-form">
         <input type="hidden" name="redirect">
@@ -42,7 +49,7 @@
       </form>
       <form method="post" action="/stories/{{.Story.ID}}/merge" data-current-redirect data-busy-submit class="supervised-action-form">
         <input type="hidden" name="redirect">
-        <button type="submit" class="secondary-button" data-busy-label="Merging pull request…" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}disabled{{end}}>Merge pull request</button>
+        <button type="submit" class="secondary-button" data-busy-label="Merging pull request…" {{if or (not .Pipeline) (not .Pipeline.PRNumber) (and .Pipeline .Pipeline.MergeConflict)}}disabled{{end}} {{if and .Pipeline .Pipeline.MergeConflict}}title="Resolve merge conflicts first"{{end}}>Merge pull request</button>
       </form>
       <details class="action-menu">
         <summary class="secondary-button action-menu-trigger" {{if or (not .Pipeline) (not .Pipeline.PRNumber)}}aria-disabled="true"{{end}} aria-label="More actions">⋯</summary>

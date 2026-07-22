@@ -164,7 +164,12 @@
 
 {{define "agent_run_controls.html"}}
 <div id="agent-run-controls" class="agent-run-controls" data-running="{{if .Status.Running}}true{{else}}false{{end}}">
-  {{if .Status.Running}}
+  {{if .ActionError}}
+  <div class="inline-notice error agent-action-error" role="alert">
+    <p>{{.ActionError}}</p>
+    {{if .ActionErrorAgentsLink}}<a href="/settings#agents">Open Settings → Agents</a>{{end}}
+  </div>
+  {{else if .Status.Running}}
   <span class="agent-status is-running">Running {{.Status.CurrentStoryID}}</span>
   {{else if .Status.LastError}}
   <details class="agent-error-details">

@@ -18,6 +18,13 @@
     </div>
   </header>
 
+  {{if .Run.ActionError}}
+  <div class="inline-notice error run-action-error" role="alert">
+    <p>{{.Run.ActionError}}</p>
+    {{if .Run.ActionErrorAgentsLink}}<a href="/settings#agents">Open Settings → Agents</a>{{end}}
+  </div>
+  {{end}}
+
   <div class="run-layout">
     <aside class="run-sidebar">
       <div class="run-sidebar-heading"><div><span class="eyebrow">{{if .Run.Run.ID}}Run #{{.Run.Run.ID}}{{else}}Ready queue{{end}}</span><h2>Stories</h2></div><strong>{{if .Run.Run.ID}}{{.Run.Run.Completed}}/{{.Run.Run.Total}}{{else}}{{len .Run.LiveQueue}}{{end}}</strong></div>
@@ -53,9 +60,6 @@
             </div>
           </details>
           {{else}}<div class="transcript-empty"><span class="mono">&gt;_</span><h3>Waiting for the first agent event</h3><p>The transcript will build here as the run advances.</p></div>{{end}}
-          {{if .Run.ActionError}}
-          <p class="inline-notice error run-action-error" role="alert">{{.Run.ActionError}}</p>
-          {{end}}
           {{if .Run.Summary.AwaitingHumanPRs}}
           <section class="run-human-actions{{if .Run.Agent.Running}} is-agent-running{{end}}" data-run-section="awaiting-human" data-supervised-panel>
             <div class="run-human-actions-heading">
@@ -66,7 +70,7 @@
               <p class="muted" data-awaiting-help>{{if .Run.Agent.Running}}The agent is working on this story. Actions will unlock when it finishes.{{else}}Review each PR, leave feedback if needed, then act here without leaving the run. One action at a time.{{end}}</p>
             </div>
             {{range .Run.Summary.AwaitingHumanPRs}}
-            <article class="run-human-action-card" data-supervised-actions>
+            <article class="run-human-action-card{{if .HasMergeConflict}} has-merge-conflict{{end}}" data-supervised-actions>
               <div class="run-human-action-meta">
                 <strong class="mono">{{.StoryID}}</strong>
                 <h4>{{.StoryTitle}}</h4>
@@ -75,7 +79,14 @@
                   {{if .Branch}}<span class="mono muted">{{.Branch}}</span>{{end}}
                 </p>
               </div>
+              {{if .HasMergeConflict}}
+              <p class="inline-notice warning merge-conflict-notice" role="status">
+                Merge conflicts with the base branch. Fix conflicts before merging.
+                {{if .ConflictDetail}}<span class="muted">{{.ConflictDetail}}</span>{{end}}
+              </p>
+              {{end}}
               <p class="supervised-busy-status" data-supervised-busy-status hidden role="status" aria-live="polite"></p>
+              <p class="supervised-wait-status" data-supervised-wait-status hidden role="status">Waiting — another story action is in progress</p>
               <div class="run-human-action-buttons">
                 <form method="post" action="/stories/{{.StoryID}}/address-feedback" data-current-redirect data-busy-submit class="supervised-action-form">
                   <input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/runs/{{$.Run.Run.ID}}">
@@ -83,7 +94,7 @@
                 </form>
                 <form method="post" action="/stories/{{.StoryID}}/merge" data-current-redirect data-busy-submit class="supervised-action-form">
                   <input type="hidden" name="redirect" value="/projects/{{$.Project.ID}}/runs/{{$.Run.Run.ID}}">
-                  <button type="submit" class="secondary-button" data-busy-label="Merging pull request…" {{if $.Run.Agent.Running}}disabled{{end}}>Merge pull request</button>
+                  <button type="submit" class="secondary-button" data-busy-label="Merging pull request…" {{if or $.Run.Agent.Running .HasMergeConflict}}disabled{{end}} {{if .HasMergeConflict}}title="Resolve merge conflicts first"{{end}}>Merge pull request</button>
                 </form>
                 <details class="action-menu">
                   <summary class="secondary-button action-menu-trigger" {{if $.Run.Agent.Running}}aria-disabled="true"{{end}} aria-label="More actions">⋯</summary>
@@ -101,7 +112,7 @@
               </div>
               <p class="muted settings-help">
                 <strong>Act on review comments</strong> — agent reads the latest PR feedback and pushes fixes.<br>
-                <strong>Merge pull request</strong> — Ripple runs checks, merges on GitHub, and marks the story done.<br>
+                <strong>Merge pull request</strong> — Ripple runs checks, merges on GitHub, and marks the story done.{{if .HasMergeConflict}} Disabled while conflicts remain.{{end}}<br>
                 More actions (⋯): fix conflicts with main, or mark done if you already merged on GitHub.
               </p>
             </article>

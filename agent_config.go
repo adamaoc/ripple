@@ -673,7 +673,7 @@ func (a *App) settingsAgentsData(ctx context.Context, flash string) (SettingsAge
 		ReviewerProviderID:    cfg.ReviewerProviderID,
 		CodexBinaryPath:       codexPath,
 		GrokBinaryPath:        grokPath,
-		Probes:                a.probeAgentTools(ctx, codexPath, grokPath, cfg.ReviewerProviderID),
+		Probes:                a.probeAgentTools(ctx, codexPath, grokPath, cfg.ImplementerProviderID, cfg.ReviewerProviderID),
 		Saved:                 flash == "saved" || flash == "api_saved" || flash == "api_deleted" || flash == "api_tested",
 		Flash:                 flash,
 		PathPrecedence:        "env override > settings path > auto-detect",
@@ -695,17 +695,30 @@ func (a *App) settingsAgentsData(ctx context.Context, flash string) (SettingsAge
 	return data, nil
 }
 
-func (a *App) probeAgentTools(ctx context.Context, codexSettingsPath, grokSettingsPath, reviewerID string) []ToolProbe {
+func (a *App) probeAgentTools(ctx context.Context, codexSettingsPath, grokSettingsPath, implementerID, reviewerID string) []ToolProbe {
 	probes := make([]ToolProbe, 0, 4)
 
 	codexPath, codexErr := resolveCodexBinaryWithSettings(codexSettingsPath)
-	probes = append(probes, probeCLITool("Codex (implementer)", codexPath, codexErr))
+	probes = append(probes, probeCLITool("Codex CLI"+cliRoleSuffix(ProviderIDCodexCLI, implementerID, reviewerID), codexPath, codexErr))
 
 	grokPath, grokErr := resolveGrokBinaryWithSettings(grokSettingsPath)
-	probes = append(probes, probeCLITool("Grok CLI", grokPath, grokErr))
+	probes = append(probes, probeCLITool("Grok CLI"+cliRoleSuffix(ProviderIDGrokCLI, implementerID, reviewerID), grokPath, grokErr))
 
 	ghPath, ghErr := resolveGhBinary()
 	probes = append(probes, probeCLITool("GitHub CLI (gh)", ghPath, ghErr))
+
+	if strings.TrimSpace(implementerID) != "" {
+		if impl, err := a.resolveImplementer(ctx); err == nil {
+			probes = append(probes, ToolProbe{
+				Name:   "Active implementer (CLI)",
+				Found:  true,
+				Path:   impl.BinaryPath,
+				Detail: impl.ProviderName,
+			})
+		} else {
+			probes = append(probes, ToolProbe{Name: "Active implementer", Found: false, Detail: err.Error()})
+		}
+	}
 
 	if strings.TrimSpace(reviewerID) != "" {
 		if rev, err := a.resolveReviewer(ctx); err == nil {
@@ -730,6 +743,21 @@ func (a *App) probeAgentTools(ctx context.Context, codexSettingsPath, grokSettin
 	}
 
 	return probes
+}
+
+// cliRoleSuffix labels a CLI tool with the roles currently bound to it.
+func cliRoleSuffix(providerID, implementerID, reviewerID string) string {
+	var roles []string
+	if providerID == strings.TrimSpace(implementerID) {
+		roles = append(roles, "implementer")
+	}
+	if providerID == strings.TrimSpace(reviewerID) {
+		roles = append(roles, "reviewer")
+	}
+	if len(roles) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(roles, " + ") + ")"
 }
 
 func probeCLITool(name, path string, resolveErr error) ToolProbe {

@@ -34,6 +34,7 @@ const (
 	eventFeedbackNoChanges    = "feedback_no_changes"
 	eventResolvingConflicts   = "resolving_conflicts"
 	eventConflictsResolved    = "conflicts_resolved"
+	eventMergeConflictDetected = "merge_conflict_detected"
 
 	PipelinePhasePreflight         = "preflight"
 	PipelinePhaseBranching         = "branching"
@@ -68,6 +69,8 @@ type StoryPipeline struct {
 	PRURL         string
 	ReviewJSON    string
 	Error         string
+	// MergeConflict is set when GitHub reports the PR cannot merge cleanly (usually after another PR landed).
+	MergeConflict bool
 }
 
 type pipelineContext struct {
@@ -620,6 +623,24 @@ func ghPRIsMerged(ctx context.Context, ghBin, dir string, prNumber int) (bool, e
 		return true, nil
 	}
 	return false, nil
+}
+
+// ghPRHasMergeConflicts reports whether GitHub currently sees the PR as conflicting with its base.
+// UNKNOWN is treated as not conflicting so we do not block on transient GitHub calculation delays.
+func ghPRHasMergeConflicts(ctx context.Context, ghBin, dir string, prNumber int) (bool, string, error) {
+	conflicted, unknown, detail, err := inspectPRMergeConflicts(ctx, ghBin, dir, prNumber)
+	if err != nil {
+		return false, "", err
+	}
+	if unknown {
+		return false, "", nil
+	}
+	return conflicted, detail, nil
+}
+
+func looksLikeMergeConflictError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "merge conflict") || strings.Contains(lower, "has merge conflicts")
 }
 
 func runQualityGate(ctx context.Context, dir string) error {
@@ -1178,8 +1199,12 @@ func extractGrokJSONText(stdout string) (string, error) {
 
 func (a *App) upsertStoryPipeline(ctx context.Context, pipeline StoryPipeline) error {
 	now := formatTime(timeNowUTC())
-	_, err := a.db.ExecContext(ctx, `INSERT INTO story_pipelines (queue_run_id, story_id, phase, branch, default_branch, pr_number, pr_url, review_json, error, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	conflict := 0
+	if pipeline.MergeConflict {
+		conflict = 1
+	}
+	_, err := a.db.ExecContext(ctx, `INSERT INTO story_pipelines (queue_run_id, story_id, phase, branch, default_branch, pr_number, pr_url, review_json, error, merge_conflict, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(queue_run_id, story_id) DO UPDATE SET
 			phase = excluded.phase,
 			branch = excluded.branch,
@@ -1188,9 +1213,10 @@ func (a *App) upsertStoryPipeline(ctx context.Context, pipeline StoryPipeline) e
 			pr_url = excluded.pr_url,
 			review_json = excluded.review_json,
 			error = excluded.error,
+			merge_conflict = excluded.merge_conflict,
 			updated_at = excluded.updated_at`,
 		pipeline.QueueRunID, pipeline.StoryID, pipeline.Phase, pipeline.Branch, pipeline.DefaultBranch,
-		pipeline.PRNumber, pipeline.PRURL, pipeline.ReviewJSON, pipeline.Error, now)
+		pipeline.PRNumber, pipeline.PRURL, pipeline.ReviewJSON, pipeline.Error, conflict, now)
 	return err
 }
 
@@ -1399,22 +1425,24 @@ func (a *App) pausePipelineForHuman(ctx context.Context, pc pipelineContext, pip
 }
 
 func (a *App) getStoryPipeline(ctx context.Context, queueRunID int64, storyID string) (StoryPipeline, error) {
-	row := a.db.QueryRowContext(ctx, `SELECT id, queue_run_id, story_id, phase, branch, default_branch, pr_number, pr_url, review_json, error
+	row := a.db.QueryRowContext(ctx, `SELECT id, queue_run_id, story_id, phase, branch, default_branch, pr_number, pr_url, review_json, error, COALESCE(merge_conflict, 0)
 		FROM story_pipelines WHERE queue_run_id = ? AND story_id = ?`, queueRunID, storyID)
-	var p StoryPipeline
-	if err := row.Scan(&p.ID, &p.QueueRunID, &p.StoryID, &p.Phase, &p.Branch, &p.DefaultBranch, &p.PRNumber, &p.PRURL, &p.ReviewJSON, &p.Error); err != nil {
-		return StoryPipeline{}, err
-	}
-	return p, nil
+	return scanStoryPipeline(row)
 }
 
 func (a *App) getLatestStoryPipeline(ctx context.Context, storyID string) (StoryPipeline, error) {
-	row := a.db.QueryRowContext(ctx, `SELECT id, queue_run_id, story_id, phase, branch, default_branch, pr_number, pr_url, review_json, error
+	row := a.db.QueryRowContext(ctx, `SELECT id, queue_run_id, story_id, phase, branch, default_branch, pr_number, pr_url, review_json, error, COALESCE(merge_conflict, 0)
 		FROM story_pipelines WHERE story_id = ? ORDER BY id DESC LIMIT 1`, storyID)
+	return scanStoryPipeline(row)
+}
+
+func scanStoryPipeline(row rowScanner) (StoryPipeline, error) {
 	var p StoryPipeline
-	if err := row.Scan(&p.ID, &p.QueueRunID, &p.StoryID, &p.Phase, &p.Branch, &p.DefaultBranch, &p.PRNumber, &p.PRURL, &p.ReviewJSON, &p.Error); err != nil {
+	var conflict int
+	if err := row.Scan(&p.ID, &p.QueueRunID, &p.StoryID, &p.Phase, &p.Branch, &p.DefaultBranch, &p.PRNumber, &p.PRURL, &p.ReviewJSON, &p.Error, &conflict); err != nil {
 		return StoryPipeline{}, err
 	}
+	p.MergeConflict = conflict != 0
 	return p, nil
 }
 
@@ -1726,6 +1754,7 @@ func (a *App) runResolveConflicts(ctx context.Context, baseURL string, story Sto
 func (a *App) completeResolveConflicts(ctx context.Context, story Story, pipeline StoryPipeline, agentResolved bool, message string) error {
 	pipeline.Phase = PipelinePhaseAwaitingHuman
 	pipeline.Error = ""
+	pipeline.MergeConflict = false
 	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
 		return err
 	}
@@ -1761,6 +1790,9 @@ const eventQualityGateFailed = "quality_gate_failed"
 
 // Test hook for external PR merge detection (production default; overridden in tests).
 var checkPRMerged = ghPRIsMerged
+var checkPRMergeConflicts = ghPRHasMergeConflicts
+var afterMergeConflictProbeDelay = 1500 * time.Millisecond
+var mergeConflictRetryDelay = 1 * time.Second
 
 // prepareHumanMerge validates a supervised story is ready for human merge.
 func (a *App) prepareHumanMerge(ctx context.Context, storyID string) (Story, Project, StoryPipeline, error) {
@@ -1787,6 +1819,9 @@ func (a *App) prepareHumanMerge(ctx context.Context, storyID string) (Story, Pro
 	}
 	if pipeline.PRNumber <= 0 {
 		return Story{}, Project{}, StoryPipeline{}, badRequest("This story does not have a pull request to merge")
+	}
+	if pipeline.MergeConflict {
+		return Story{}, Project{}, StoryPipeline{}, badRequest("This pull request has merge conflicts. Use Fix merge conflicts, then try merge again.")
 	}
 	return story, project, pipeline, nil
 }
@@ -1842,12 +1877,35 @@ func (a *App) executeHumanMerge(ctx context.Context, story Story, project Projec
 	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
 		return err
 	}
+
+	// Re-check mergeability right before gh merge — another PR may have landed since the page loaded.
+	if conflicted, detail, err := checkPRMergeConflicts(ctx, ghBin, dir, pipeline.PRNumber); err != nil {
+		_ = a.addEvent(ctx, story.ID, "merge_failed", "Mergeability check failed: "+err.Error())
+		return badRequest("Could not verify PR mergeability. " + truncate(err.Error(), 300))
+	} else if conflicted {
+		pipeline.MergeConflict = true
+		pipeline.Phase = PipelinePhaseAwaitingHuman
+		pipeline.Error = detail
+		_ = a.upsertStoryPipeline(ctx, pipeline)
+		_ = a.addEvent(ctx, story.ID, eventMergeConflictDetected, detail)
+		a.publishAgentEvent("board")
+		return badRequest("Pull request has merge conflicts. Use Fix merge conflicts, then try merge again.")
+	}
+
 	if err := humanMergePR(ctx, ghBin, dir, pipeline.PRNumber, project.DeleteBranchOnMerge); err != nil {
 		pipeline.Error = err.Error()
 		pipeline.Phase = PipelinePhaseAwaitingHuman
+		if looksLikeMergeConflictError(err.Error()) {
+			pipeline.MergeConflict = true
+			_ = a.addEvent(ctx, story.ID, eventMergeConflictDetected, "Merge blocked by conflicts: "+err.Error())
+		} else {
+			_ = a.addEvent(ctx, story.ID, "merge_failed", "Merge failed: "+err.Error())
+		}
 		_ = a.upsertStoryPipeline(ctx, pipeline)
-		_ = a.addEvent(ctx, story.ID, "merge_failed", "Merge failed: "+err.Error())
 		a.publishAgentEvent("board")
+		if pipeline.MergeConflict {
+			return badRequest("Pull request has merge conflicts. Use Fix merge conflicts, then try merge again.")
+		}
 		return badRequest("Merge failed; story stays in review. " + truncate(err.Error(), 400))
 	}
 
@@ -1943,6 +2001,7 @@ func (a *App) syncExternalPRMerge(ctx context.Context, storyID string) error {
 func (a *App) finalizeMergedStory(ctx context.Context, story Story, pipeline StoryPipeline, eventType, statusMessage, eventMsg string) error {
 	pipeline.Phase = PipelinePhaseCompleted
 	pipeline.Error = ""
+	pipeline.MergeConflict = false
 	if err := a.upsertStoryPipeline(ctx, pipeline); err != nil {
 		return err
 	}
@@ -1955,9 +2014,131 @@ func (a *App) finalizeMergedStory(ctx context.Context, story Story, pipeline Sto
 	// Best-effort: if this story is still awaiting_human on its queue run, mark completed.
 	if pipeline.QueueRunID > 0 {
 		_ = a.updateQueueRunItemStatus(ctx, pipeline.QueueRunID, story.ID, QueueItemCompleted)
+		_ = a.refreshAwaitingPRConflicts(ctx, pipeline.QueueRunID, story.ProjectID)
 	}
 	a.publishAgentEvent("board")
 	return nil
+}
+
+// refreshAwaitingPRConflicts checks remaining awaiting-human PRs in a queue run for merge conflicts
+// (typically after another story in the same run was merged into the base branch).
+func (a *App) refreshAwaitingPRConflicts(ctx context.Context, queueRunID int64, projectID string) error {
+	if queueRunID <= 0 {
+		return nil
+	}
+	items, err := a.listQueueRunItems(ctx, queueRunID)
+	if err != nil {
+		return err
+	}
+	project, err := a.getProject(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(project.WorkingDirectory) == "" {
+		return nil
+	}
+	ghBin, err := resolveGhBinary()
+	if err != nil {
+		return err
+	}
+
+	awaiting := make([]QueueRunItem, 0)
+	for _, item := range items {
+		if item.Status == QueueItemAwaitingHuman {
+			awaiting = append(awaiting, item)
+		}
+	}
+	if len(awaiting) == 0 {
+		return nil
+	}
+
+	// GitHub often returns UNKNOWN briefly after another PR lands; give it a moment, then retry.
+	if afterMergeConflictProbeDelay > 0 {
+		time.Sleep(afterMergeConflictProbeDelay)
+	}
+
+	for _, item := range awaiting {
+		pipeline, err := a.getStoryPipeline(ctx, queueRunID, item.Story.ID)
+		if err != nil || pipeline.PRNumber <= 0 {
+			continue
+		}
+		conflicted, detail, err := checkPRMergeConflictsWithRetry(ctx, ghBin, project.WorkingDirectory, pipeline.PRNumber)
+		if err != nil {
+			continue
+		}
+		if pipeline.MergeConflict == conflicted {
+			continue
+		}
+		pipeline.MergeConflict = conflicted
+		if conflicted {
+			if detail == "" {
+				detail = "Pull request has merge conflicts with the base branch"
+			}
+			pipeline.Error = detail
+			_ = a.addEvent(ctx, item.Story.ID, eventMergeConflictDetected, detail+". Merge is disabled until conflicts are fixed.")
+		} else if strings.Contains(strings.ToLower(pipeline.Error), "conflict") {
+			pipeline.Error = ""
+		}
+		_ = a.upsertStoryPipeline(ctx, pipeline)
+	}
+	a.publishAgentEvent("activity")
+	return nil
+}
+
+func checkPRMergeConflictsWithRetry(ctx context.Context, ghBin, dir string, prNumber int) (bool, string, error) {
+	if mergeConflictRetryDelay <= 0 {
+		return checkPRMergeConflicts(ctx, ghBin, dir, prNumber)
+	}
+	for attempt := 0; attempt < 4; attempt++ {
+		conflicted, unknown, detail, err := inspectPRMergeConflicts(ctx, ghBin, dir, prNumber)
+		if err != nil {
+			return false, "", err
+		}
+		if !unknown {
+			return conflicted, detail, nil
+		}
+		if attempt == 3 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return false, "", ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * mergeConflictRetryDelay):
+		}
+	}
+	return false, "", nil
+}
+
+// inspectPRMergeConflicts returns conflicted/unknown from GitHub's mergeable fields.
+func inspectPRMergeConflicts(ctx context.Context, ghBin, dir string, prNumber int) (conflicted, unknown bool, detail string, err error) {
+	stdout, stderr, err := runCommand(ctx, dir, ghBin, "pr", "view", fmt.Sprintf("%d", prNumber), "--json", "mergeable,mergeStateStatus")
+	if err != nil {
+		detail := strings.TrimSpace(stderr)
+		if detail == "" {
+			detail = err.Error()
+		}
+		return false, false, "", fmt.Errorf("check PR mergeability failed: %s", detail)
+	}
+	var view struct {
+		Mergeable        string `json:"mergeable"`
+		MergeStateStatus string `json:"mergeStateStatus"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &view); err != nil {
+		return false, false, "", fmt.Errorf("parse PR mergeability: %w", err)
+	}
+	mergeable := strings.ToUpper(strings.TrimSpace(view.Mergeable))
+	state := strings.ToUpper(strings.TrimSpace(view.MergeStateStatus))
+	if mergeable == "UNKNOWN" || state == "UNKNOWN" || mergeable == "" {
+		return false, true, "", nil
+	}
+	if mergeable == "CONFLICTING" || state == "DIRTY" {
+		detail := "Pull request has merge conflicts with the base branch"
+		if state != "" {
+			detail = fmt.Sprintf("%s (GitHub: %s / %s)", detail, mergeable, state)
+		}
+		return true, false, detail, nil
+	}
+	return false, false, "", nil
 }
 
 func timeNowUTC() time.Time {
